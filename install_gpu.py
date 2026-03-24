@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """
 Post-install GPU accelerator — called by Inno Setup [Run] section.
-Reads _gpu_choice.txt written by the installer's Pascal code,
-then replaces onnxruntime with the GPU variant.
+Usage: install_gpu.py cuda|dml
+Replaces onnxruntime (CPU) with the GPU variant chosen in the installer wizard.
 """
-import pathlib
 import subprocess
 import sys
 
@@ -19,15 +18,8 @@ def run(*args, **kwargs):
     return subprocess.run(list(args), **kwargs)
 
 def main():
-    install_dir = pathlib.Path(__file__).parent
-    choice_file = install_dir / "_gpu_choice.txt"
-
-    if not choice_file.exists():
-        print("No GPU choice file found — skipping GPU setup.")
-        sys.exit(0)
-
-    choice = choice_file.read_text(encoding="utf-8").strip().lower()
-    choice_file.unlink(missing_ok=True)
+    # GPU choice is passed as a command-line argument by the Inno Setup [Run] section
+    choice = sys.argv[1].strip().lower() if len(sys.argv) > 1 else "cpu"
 
     if choice not in PACKAGES:
         print(f"GPU mode '{choice}' = CPU only. No changes needed.")

@@ -202,7 +202,7 @@ Filename: "{app}\python\python.exe"; \
 
 ; Upgrade onnxruntime to GPU variant based on user's choice
 Filename: "{app}\python\python.exe"; \
-    Parameters: """{app}\install_gpu.py"""; \
+    Parameters: """{app}\install_gpu.py"" {code:GetGpuChoice}"; \
     WorkingDir: "{app}"; \
     StatusMsg: "正在配置 GPU 加速 / Configuring GPU acceleration..."; \
     Flags: waituntilterminated; \
@@ -250,7 +250,9 @@ begin
     wpSelectComponents,
     CustomMessage('GpuPageTitle'),
     CustomMessage('GpuPageDesc'),
-    False, False
+    '',    { ASubCaption }
+    True,  { AExclusive — radio buttons, only one choice }
+    False  { AWordWrap }
   );
 
   if HasNvidia then begin
@@ -298,16 +300,16 @@ begin
       end;
     end;
 
-    // Write choice to a temp file so install_gpu.py can read it
-    SaveStringToFile(
-      ExpandConstant('{app}\_gpu_choice.txt'),
-      GpuChoice,
-      False
-    );
   end;
 end;
 
-// ── Check if we need to run the GPU upgrade step ─────────────────────────────
+// ── Pass GPU choice as CLI argument to install_gpu.py ────────────────────────
+function GetGpuChoice(Param: String): String;
+begin
+  Result := GpuChoice;
+end;
+
+// ── Check if we need to run the GPU upgrade step ──────────────────────────────
 function NeedsGpuUpgrade(): Boolean;
 begin
   Result := (GpuChoice = 'cuda') or (GpuChoice = 'dml');
