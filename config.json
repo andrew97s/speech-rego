@@ -1,0 +1,25 @@
+{
+  "_comment": "Speech Recognition Service Configuration",
+  "host": "127.0.0.1",
+  "port": 8765,
+  "wake_word": {
+    "enabled": true,
+    "keywords": ["hey_jarvis"],
+    "sensitivity": 0.5,
+    "_keywords_note": "Available: hey_jarvis, alexa, hey_mycroft, hey_rhasspy"
+  },
+  "asr": {
+    "model_path": "models/vosk-model-small-cn-0.22",
+    "max_silence_ms": 1500,
+    "max_listen_ms": 30000,
+    "_model_note": "cn: vosk-model-small-cn-0.22 | en: vosk-model-small-en-us-0.15"
+  },
+  "audio": {
+    "device": null,
+    "sample_rate": 16000,
+    "chunk_size": 4000,
+    "energy_threshold": 0.02,
+    "_device_note": "null = system default mic; run list_devices.py to see device IDs"
+  },
+  "log_level": "INFO"
+}
