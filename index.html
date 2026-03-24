@@ -323,6 +323,19 @@
   .log-box .log-line.ev-error          { color: var(--danger); }
   .log-box .log-line.ev-listening_start{ color: var(--primary); }
 
+  /* ─── Mode hint ─────────────────────────────────────────── */
+  .mode-hint {
+    font-size: .75rem;
+    margin: -6px 0 10px 88px;
+    padding: 5px 10px;
+    border-radius: 5px;
+    border-left: 3px solid var(--border);
+    color: var(--muted);
+  }
+  .hint-vosk         { border-color: var(--primary); color: #8ab4f8; }
+  .hint-openwakeword { border-color: var(--warn);    color: var(--warn); }
+  .hint-auto         { border-color: var(--success); color: var(--success); }
+
   /* ─── Send cmd ──────────────────────────────────────────── */
   .raw-row {
     display: flex;
@@ -398,10 +411,27 @@
     <div class="card">
       <div class="card-title">运行时配置</div>
 
+      <!-- Mode selector -->
+      <div class="config-row">
+        <label>检测模式</label>
+        <select id="cfgMode" onchange="applyMode()">
+          <option value="auto">auto（自动）</option>
+          <option value="vosk">vosk（中文自定义）</option>
+          <option value="openwakeword">openwakeword（英文）</option>
+        </select>
+      </div>
+      <div id="modeHint" class="mode-hint hint-vosk">
+        vosk 模式：使用语音模型关键词检测，支持任意中文词组（如"你好小智"）
+      </div>
+
+      <!-- Keyword input -->
       <div class="config-row">
         <label>唤醒词</label>
-        <input type="text" id="cfgKeyword" value="hey_jarvis" placeholder="hey_jarvis">
+        <input type="text" id="cfgKeyword" value="你好小智" placeholder="你好小智 或 hey_jarvis">
         <button class="btn btn-ghost btn-sm" onclick="applyKeyword()">应用</button>
+      </div>
+      <div style="font-size:.75rem;color:var(--muted);margin:-6px 0 10px 88px;">
+        多个词用英文逗号分隔，如：<code style="color:var(--primary)">你好小智,开始录音</code>
       </div>
 
       <div class="config-row">
@@ -411,13 +441,16 @@
         <span class="range-val" id="cfgSensVal">0.5</span>
         <button class="btn btn-ghost btn-sm" onclick="applySensitivity()">应用</button>
       </div>
+      <div style="font-size:.75rem;color:var(--muted);margin:-6px 0 10px 88px;">
+        仅对 openwakeword 模式有效
+      </div>
 
       <div class="config-row">
         <label>唤醒词</label>
         <label style="width:auto;color:var(--text)">
           <input type="checkbox" id="cfgWWEnabled" checked
                  onchange="sendConfigBool('wake_word.enabled', this.checked)">
-          启用
+          启用（关闭则检测到声音即开始识别）
         </label>
       </div>
 
@@ -532,10 +565,30 @@
   }
 
   // ── Config senders ────────────────────────────────────────────────────────────
+  function applyMode() {
+    const mode = document.getElementById('cfgMode').value;
+    send({ cmd: 'config', key: 'wake_word.mode', value: mode });
+    updateModeHint(mode);
+    logEvent('system', `唤醒模式已设为: ${mode}（重启服务后生效）`);
+  }
+
+  function updateModeHint(mode) {
+    const hints = {
+      auto:         'auto 模式：含中文关键词自动使用 Vosk，否则使用 openwakeword',
+      vosk:         'vosk 模式：使用语音模型关键词检测，支持任意中文词组（如"你好小智"）',
+      openwakeword: 'openwakeword 模式：英文预训练模型，可用词: hey_jarvis / alexa / hey_mycroft',
+    };
+    const el = document.getElementById('modeHint');
+    el.textContent = hints[mode] || '';
+    el.className = `mode-hint hint-${mode}`;
+  }
+
   function applyKeyword() {
-    const kw = document.getElementById('cfgKeyword').value.trim();
-    if (!kw) return;
-    send({ cmd: 'config', key: 'wake_word.keywords', value: [kw] });
+    const raw = document.getElementById('cfgKeyword').value.trim();
+    if (!raw) return;
+    // Support comma-separated keywords: "你好小智, 开始录音" → ["你好小智","开始录音"]
+    const kws = raw.split(',').map(s => s.trim()).filter(Boolean);
+    send({ cmd: 'config', key: 'wake_word.keywords', value: kws });
   }
 
   function applySensitivity() {
@@ -561,9 +614,17 @@
 
     if (event === 'status') {
       setEngineState(msg.state);
-      // Sync UI checkboxes
       if (msg.wake_word_enabled !== undefined) {
         document.getElementById('cfgWWEnabled').checked = msg.wake_word_enabled;
+      }
+      if (msg.mode) {
+        const sel = document.getElementById('cfgMode');
+        if (sel.value !== msg.mode) sel.value = msg.mode;
+        updateModeHint(msg.mode);
+      }
+      if (msg.keywords && msg.keywords.length) {
+        const kwInput = document.getElementById('cfgKeyword');
+        kwInput.value = msg.keywords.join(', ');
       }
 
     } else if (event === 'wake_word') {
@@ -707,6 +768,9 @@
   document.getElementById('rawCmd').addEventListener('keydown', e => {
     if (e.key === 'Enter') sendRaw();
   });
+
+  // Init mode hint
+  updateModeHint(document.getElementById('cfgMode').value);
 
   logEvent('system', '就绪，点击「连接」开始。');
 </script>
