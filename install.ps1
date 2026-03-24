@@ -27,6 +27,13 @@
 $ErrorActionPreference = "Stop"
 $ProgressPreference    = "SilentlyContinue"   # faster Invoke-WebRequest
 
+# ── Force UTF-8 console output (fixes Chinese on all Windows locales) ──────────
+# Must be set BEFORE any Write-Host calls that contain non-ASCII characters.
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)  # UTF-8, no BOM
+[Console]::InputEncoding  = [System.Text.UTF8Encoding]::new($false)
+$OutputEncoding           = [System.Text.UTF8Encoding]::new($false)
+$null = & chcp 65001 2>&1   # also set cmd code-page for any child processes
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Colour helpers
 # ──────────────────────────────────────────────────────────────────────────────

@@ -4,6 +4,11 @@
 ::  Speech Recognition Service — Start Script
 :: ─────────────────────────────────────────────────────────────────
 
+:: UTF-8 console (Chinese display + Python log output)
+chcp 65001 >nul
+set PYTHONIOENCODING=utf-8
+set PYTHONUTF8=1
+
 title 语音识别服务 / Speech Recognition Service
 
 cd /d "%~dp0"

@@ -7,6 +7,9 @@
 ::  管理员权限用于安装 VC++ 运行时（如未安装）。
 :: ─────────────────────────────────────────────────────────────────
 
+:: Switch console to UTF-8 so Chinese characters display correctly
+chcp 65001 >nul
+
 title Speech Recognition Service — Installer
 
 :: ── Quick sanity: make sure we are on x64 ─────────────────────────
@@ -34,7 +37,8 @@ if %errorLevel% neq 0 (
 )
 
 :: ── Run the PowerShell installer ─────────────────────────────────
-PowerShell -NoProfile -ExecutionPolicy Bypass -File "%~dp0install.ps1"
+:: -InputFormat Text ensures PS reads stdin as text (not binary)
+PowerShell -NoProfile -ExecutionPolicy Bypass -InputFormat Text -File "%~dp0install.ps1"
 
 echo.
 pause
