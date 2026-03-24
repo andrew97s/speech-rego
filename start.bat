@@ -1,5 +1,5 @@
 @echo off
-:: Speech Recognition Service - Start Script
+:: Speech Recognition Service - Start Script (dev venv)
 
 chcp 65001 >nul
 set PYTHONIOENCODING=utf-8
@@ -12,7 +12,6 @@ cd /d "%~dp0"
 :: Check virtual environment
 if not exist ".venv\Scripts\python.exe" (
     echo.
-    echo  [错误] 未找到虚拟环境 .venv
     echo  [ERROR] Virtual environment not found.
     echo  Please run install.bat first.
     echo.
@@ -26,8 +25,7 @@ if not exist ".venv\Scripts\python.exe" (
   2>nul
 if errorlevel 1 (
     echo.
-    echo  [警告] 未找到 ASR 模型文件。
-    echo  [WARN]  ASR model not found.
+    echo  [WARN] ASR model not found.
     echo  Run install.bat to download models, or check model_path in config.json.
     echo.
     pause
@@ -41,14 +39,13 @@ if errorlevel 1 (
 
 echo.
 echo  ================================================
-echo    语音识别 WebSocket 服务
 echo    Speech Recognition WebSocket Service
-echo    按 Ctrl+C 停止  /  Press Ctrl+C to stop
+echo    Press Ctrl+C to stop
 echo  ================================================
 echo.
 
 .venv\Scripts\python.exe server.py
 
 echo.
-echo  服务已停止。/ Service stopped.
+echo  Service stopped.
 pause

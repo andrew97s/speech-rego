@@ -35,10 +35,9 @@ shift
 goto parse_args
 :args_done
 
-:: Banner (Chinese OK here - after chcp 65001)
+:: Banner
 echo.
 echo  +========================================================+
-echo  ^|  语音识别服务 - Windows EXE 安装包构建脚本           ^|
 echo  ^|  Speech Recognition Service -- EXE Installer Builder  ^|
 echo  +========================================================+
 echo.

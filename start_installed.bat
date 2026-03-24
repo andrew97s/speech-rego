@@ -25,9 +25,9 @@ if not exist "%~dp0python\python.exe" (
   2>nul
 if errorlevel 1 (
     echo.
-    echo  [警告] 未找到 ASR 模型文件。
-    echo  [WARN]  ASR model not found.
-    echo  Run: python\python.exe download_model.py cn
+    echo  [WARN] ASR model not found.
+    echo  Re-run the installer from the Start Menu to download models, or:
+    echo    "%~dp0python\python.exe" download_model.py cn
     echo.
     pause
     exit /b 1
@@ -40,16 +40,14 @@ if errorlevel 1 (
 
 echo.
 echo  ================================================
-echo    语音识别 WebSocket 服务
 echo    Speech Recognition WebSocket Service
-echo    打开 index.html 使用控制台界面
 echo    Open index.html to use the control panel
-echo    按 Ctrl+C 停止  /  Press Ctrl+C to stop
+echo    Press Ctrl+C to stop
 echo  ================================================
 echo.
 
 "%~dp0python\python.exe" server.py
 
 echo.
-echo  服务已停止。/ Service stopped.
+echo  Service stopped.
 pause
