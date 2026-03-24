@@ -1,31 +1,25 @@
 @echo off
-:: ─────────────────────────────────────────────────────────────────
-::  语音识别服务 — 安装启动器
-::  Speech Recognition Service — Installer Launcher
-::
-::  Double-click this file to install.
-::  管理员权限用于安装 VC++ 运行时（如未安装）。
-:: ─────────────────────────────────────────────────────────────────
+:: Speech Recognition Service - Installer Launcher
+:: Double-click to install.
+:: Administrator rights used for VC++ runtime install (if needed).
 
-:: Switch console to UTF-8 so Chinese characters display correctly
 chcp 65001 >nul
 
-title Speech Recognition Service — Installer
+title Speech Recognition Service - Installer
 
-:: ── Quick sanity: make sure we are on x64 ─────────────────────────
-if /i "%PROCESSOR_ARCHITECTURE%" == "x86" (
-    if "%PROCESSOR_ARCHITEW6432%" == "" (
+:: Require x64 OS
+if /i "%PROCESSOR_ARCHITECTURE%"=="x86" (
+    if "%PROCESSOR_ARCHITEW6432%"=="" (
         echo.
         echo  [ERROR] 32-bit Windows is not supported.
-        echo          Please use a 64-bit version of Windows 10/11.
+        echo          Please use 64-bit Windows 10 or 11.
         echo.
         pause
         exit /b 1
     )
 )
 
-:: ── Elevate to Administrator if needed ───────────────────────────
-:: (required for VC++ redist silent install)
+:: Elevate to Administrator (needed for VC++ redist silent install)
 net session >nul 2>&1
 if %errorLevel% neq 0 (
     echo.
@@ -36,8 +30,7 @@ if %errorLevel% neq 0 (
     exit /b
 )
 
-:: ── Run the PowerShell installer ─────────────────────────────────
-:: -InputFormat Text ensures PS reads stdin as text (not binary)
+:: Run the PowerShell installer
 PowerShell -NoProfile -ExecutionPolicy Bypass -InputFormat Text -File "%~dp0install.ps1"
 
 echo.
