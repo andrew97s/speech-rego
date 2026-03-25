@@ -82,7 +82,7 @@ def _deep_merge(base: dict, override: dict) -> dict:
 def load_config(path: str = "config.json") -> dict:
     log = logging.getLogger("config")
     try:
-        with open(path, encoding="utf-8") as f:
+        with open(path, encoding="utf-8-sig") as f:
             user = json.load(f)
         return _deep_merge(_DEFAULTS, user)
     except FileNotFoundError:

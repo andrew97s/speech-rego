@@ -23,7 +23,7 @@ def main():
 
     cfg_path = app / "config.json"
     try:
-        cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+        cfg = json.loads(cfg_path.read_text(encoding="utf-8-sig"))
     except Exception as e:
         print(f"[check_model] ERROR: cannot read config.json: {e}", file=sys.stderr)
         sys.exit(1)

@@ -136,7 +136,7 @@ if not cfg_path.exists():
     errors.append("missing config.json")
 else:
     try:
-        cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+        cfg = json.loads(cfg_path.read_text(encoding="utf-8-sig"))
         model_path = cfg.get("asr", {}).get("model_path", "")
         mp = pathlib.Path(model_path)
         if mp.exists():

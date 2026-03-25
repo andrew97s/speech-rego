@@ -66,7 +66,7 @@ def main():
     cfg_path = install_dir / "config.json"
     try:
         import json
-        cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+        cfg = json.loads(cfg_path.read_text(encoding="utf-8-sig"))
         if not (install_dir / cfg["asr"]["model_path"]).exists():
             cfg["asr"]["model_path"] = f"models/{model_name}"
             if lang == "en":
@@ -74,7 +74,7 @@ def main():
                 cfg["wake_word"]["keywords"] = ["hey_jarvis"]
             cfg_path.write_text(
                 json.dumps(cfg, ensure_ascii=False, indent=2),
-                encoding="utf-8"
+                encoding="utf-8-sig"
             )
             print(f"Updated config.json: model_path = models/{model_name}")
     except Exception as e:
