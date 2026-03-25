@@ -79,6 +79,7 @@ powershell -NoProfile -Command ^
 :: (the _pth file restricts imports by default)
 echo Lib\site-packages >> "%PYTHON_EMBED_DIR%\python311._pth"
 echo import site       >> "%PYTHON_EMBED_DIR%\python311._pth"
+echo ..                >> "%PYTHON_EMBED_DIR%\python311._pth"
 
 :: Step 3: Install pip into embedded Python
 echo [3/8] Installing pip...

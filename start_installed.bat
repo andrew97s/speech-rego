@@ -61,6 +61,9 @@ if errorlevel 1 (
     )
 )
 
+:: Ensure app directory is on Python's module search path
+set PYTHONPATH=%~dp0
+
 :: Show GPU acceleration info
 "%~dp0python\python.exe" -c ^
   "import onnxruntime as o; p=[x for x in o.get_available_providers() if x!='CPUExecutionProvider']; print('  GPU: '+', '.join(p) if p else '  GPU: CPU only')" ^
@@ -74,7 +77,7 @@ echo    Press Ctrl+C to stop
 echo  ================================================
 echo.
 
-"%~dp0python\python.exe" server.py
+"%~dp0python\python.exe" "%~dp0server.py"
 
 echo.
 echo  Service stopped.
