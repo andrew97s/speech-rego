@@ -3,3 +3,6 @@ sounddevice>=0.4.6
 numpy>=1.24.0,<2.0.0
 vosk>=0.3.45
 openwakeword>=0.6.0
+
+# Whisper STT backend (for server_whisper.py / engine_whisper.py)
+faster-whisper>=0.10.0
