@@ -19,6 +19,13 @@ if not exist "%~dp0python\python.exe" (
     exit /b 1
 )
 
+:: Embedded Python ignores PYTHONPATH when a ._pth file is present.
+:: Ensure the app root (..) is listed in the ._pth so all app modules are importable.
+findstr /x /c:".." "%~dp0python\python311._pth" >nul 2>&1
+if errorlevel 1 (
+    echo .. >> "%~dp0python\python311._pth"
+)
+
 :: Check ASR model; if missing, offer auto-download
 :check_model
 "%~dp0python\python.exe" "%~dp0check_model.py" 2>&1 | findstr /B "[check_model]"
@@ -60,9 +67,6 @@ if errorlevel 1 (
         goto check_model
     )
 )
-
-:: Ensure app directory is on Python's module search path
-set PYTHONPATH=%~dp0
 
 :: Show GPU acceleration info
 "%~dp0python\python.exe" -c ^
