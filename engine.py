@@ -52,9 +52,18 @@ class _VoskWakeWordDetector:
         self._make_rec()
         logger.info(f"[WakeWord] Vosk mode -- keywords: {self.keywords}")
 
+    @staticmethod
+    def _to_grammar_phrase(kw: str) -> str:
+        """Vosk Chinese models are character-level; separate each CJK char with a
+        space so the recognizer can match multi-character keywords correctly."""
+        if _has_cjk(kw):
+            return " ".join(kw)
+        return kw
+
     def _make_rec(self):
         import vosk
-        grammar = json.dumps(self.keywords + ["[unk]"], ensure_ascii=False)
+        phrases = [self._to_grammar_phrase(kw) for kw in self.keywords]
+        grammar = json.dumps(phrases + ["[unk]"], ensure_ascii=False)
         self._rec = vosk.KaldiRecognizer(self._model, self._sample_rate)
         self._rec.SetGrammar(grammar)
 
@@ -62,9 +71,12 @@ class _VoskWakeWordDetector:
         if self._rec.AcceptWaveform(audio_bytes):
             result = json.loads(self._rec.Result())
             text = result.get("text", "").strip()
-            if text and text != "[unk]" and text in self.keywords:
+            # Vosk returns space-separated chars for Chinese; strip spaces before
+            # comparing against the original (no-space) keyword strings.
+            normalized = text.replace(" ", "")
+            if normalized and normalized != "[unk]" and normalized in self.keywords:
                 self._make_rec()
-                return text
+                return normalized
         return None
 
 
