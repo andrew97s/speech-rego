@@ -143,6 +143,7 @@ copy /y "%~dp0list_devices.py"     "%BUILD_DIR%\list_devices.py"     >nul
 copy /y "%~dp0verify_install.py"   "%BUILD_DIR%\verify_install.py"   >nul
 copy /y "%~dp0download_model.py"   "%BUILD_DIR%\download_model.py"   >nul
 copy /y "%~dp0install_gpu.py"      "%BUILD_DIR%\install_gpu.py"      >nul
+copy /y "%~dp0check_model.py"     "%BUILD_DIR%\check_model.py"     >nul
 copy /y "%~dp0start_installed.bat" "%BUILD_DIR%\start.bat"           >nul
 
 :: Step 7: Check / download Inno Setup 6

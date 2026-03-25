@@ -21,9 +21,8 @@ if not exist "%~dp0python\python.exe" (
 
 :: Check ASR model; if missing, offer auto-download
 :check_model
-"%~dp0python\python.exe" -c ^
-  "import json,pathlib,sys; app=pathlib.Path(sys.executable).parent.parent; c=json.loads((app/'config.json').read_text(encoding='utf-8')); p=c['asr']['model_path']; sys.exit(0 if (app/p).exists() else 1)" ^
-  2>nul
+"%~dp0python\python.exe" "%~dp0check_model.py" 2>&1 | findstr /B "[check_model]"
+"%~dp0python\python.exe" "%~dp0check_model.py" >nul 2>&1
 
 if errorlevel 1 (
     echo.

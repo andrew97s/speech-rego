@@ -129,6 +129,7 @@ Source: "{#BuildDir}\list_devices.py";   DestDir: "{app}"; Components: app
 Source: "{#BuildDir}\verify_install.py"; DestDir: "{app}"; Components: app
 Source: "{#BuildDir}\download_model.py"; DestDir: "{app}"; Components: app
 Source: "{#BuildDir}\install_gpu.py";    DestDir: "{app}"; Components: app
+Source: "{#BuildDir}\check_model.py";    DestDir: "{app}"; Components: app
 
 ; config.json — skip if already present (preserve settings across upgrades)
 Source: "{#BuildDir}\config.json"; DestDir: "{app}"; \
