@@ -67,7 +67,7 @@ def main():
     try:
         import json
         cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
-        if not pathlib.Path(cfg["asr"]["model_path"]).exists():
+        if not (install_dir / cfg["asr"]["model_path"]).exists():
             cfg["asr"]["model_path"] = f"models/{model_name}"
             if lang == "en":
                 cfg["wake_word"]["mode"] = "openwakeword"

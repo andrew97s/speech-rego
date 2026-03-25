@@ -22,7 +22,7 @@ if not exist "%~dp0python\python.exe" (
 :: Check ASR model; if missing, offer auto-download
 :check_model
 "%~dp0python\python.exe" -c ^
-  "import json,pathlib,sys; c=json.loads(pathlib.Path('config.json').read_text(encoding='utf-8')); p=c['asr']['model_path']; sys.exit(0 if pathlib.Path(p).exists() else 1)" ^
+  "import json,pathlib,sys; app=pathlib.Path(sys.executable).parent.parent; c=json.loads((app/'config.json').read_text(encoding='utf-8')); p=c['asr']['model_path']; sys.exit(0 if (app/p).exists() else 1)" ^
   2>nul
 
 if errorlevel 1 (

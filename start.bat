@@ -21,7 +21,7 @@ if not exist ".venv\Scripts\python.exe" (
 
 :: Check ASR model
 .venv\Scripts\python.exe -c ^
-  "import json,pathlib,sys; c=json.loads(pathlib.Path('config.json').read_text(encoding='utf-8')); p=c['asr']['model_path']; sys.exit(0 if pathlib.Path(p).exists() else 1)" ^
+  "import json,pathlib,sys; app=pathlib.Path('.').resolve(); c=json.loads((app/'config.json').read_text(encoding='utf-8')); p=c['asr']['model_path']; sys.exit(0 if (app/p).exists() else 1)" ^
   2>nul
 if errorlevel 1 (
     echo.
