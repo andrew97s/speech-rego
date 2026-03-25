@@ -1,28 +1,27 @@
 #!/usr/bin/env python3
 """
 Speech Recognition WebSocket Server
-Entry point: reads config, starts audio engine, serves WebSocket clients.
 
 WebSocket API
-─────────────
-Client → Server commands (JSON):
-  {"cmd": "start"}                         Start / resume the engine
-  {"cmd": "stop"}                          Stop the engine
-  {"cmd": "listen"}                        Manually trigger listening
-  {"cmd": "cancel"}                        Abort current listening session
-  {"cmd": "status"}                        Request current status
+-------------
+Client -> Server (JSON):
+  {"cmd": "start"}                           Start the engine / open mic
+  {"cmd": "stop"}                            Stop the engine / release mic
+  {"cmd": "listen"}                          Manually trigger one listen session
+  {"cmd": "cancel"}                          Abort current listen session
+  {"cmd": "status"}                          Request current status
   {"cmd": "config", "key": "k", "value": v}  Update a config value at runtime
 
-Server → Client events (JSON):
-  {"event": "status",        "state": "idle|listening|stopped", "wake_word_enabled": bool, "keywords": [...], "ts": float}
-  {"event": "wake_word",     "keyword": str, "score": float, "ts": float}
-  {"event": "listening_start","trigger": "wake_word|manual|vad", "ts": float}
-  {"event": "partial",       "text": str, "ts": float}
-  {"event": "transcript",    "text": str, "is_final": true, "ts": float}
-  {"event": "listening_end", "reason": "silence|timeout|cancelled", "ts": float}
-  {"event": "error",         "code": str, "message": str, "ts": float}
-  {"event": "ack",           "cmd": str, "ts": float}
-  {"event": "config_updated","key": str, "value": any, "ts": float}
+Server -> Client (JSON):
+  {"event": "status",          "state": "stopped|no_device|idle|listening", ...}
+  {"event": "wake_word",       "keyword": str, "score": float, "ts": float}
+  {"event": "listening_start", "trigger": "wake_word|manual|vad", "ts": float}
+  {"event": "partial",         "text": str, "ts": float}
+  {"event": "transcript",      "text": str, "is_final": true, "ts": float}
+  {"event": "listening_end",   "reason": "silence|timeout|cancelled", "ts": float}
+  {"event": "error",           "code": str, "message": str, "ts": float}
+  {"event": "ack",             "cmd": str, "ts": float}
+  {"event": "config_updated",  "key": str, "value": any, "ts": float}
 """
 
 import asyncio
@@ -37,12 +36,12 @@ from websockets.server import WebSocketServerProtocol
 
 from engine import SpeechEngine, EngineState
 
-# ── Windows asyncio policy (required for Python 3.8–3.11 with some APIs) ──────
+# Windows: use Selector event loop for proper signal / Ctrl+C delivery
 if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
 
-# ── Config helpers ────────────────────────────────────────────────────────────
+# ── Config helpers ─────────────────────────────────────────────────────────────
 
 _DEFAULTS: dict = {
     "host": "127.0.0.1",
@@ -70,7 +69,7 @@ _DEFAULTS: dict = {
 def _deep_merge(base: dict, override: dict) -> dict:
     result = base.copy()
     for k, v in override.items():
-        if k.startswith("_"):  # skip comment keys
+        if k.startswith("_"):
             continue
         if k in result and isinstance(result[k], dict) and isinstance(v, dict):
             result[k] = _deep_merge(result[k], v)
@@ -103,7 +102,7 @@ def setup_logging(level: str = "INFO"):
     )
 
 
-# ── WebSocket server ──────────────────────────────────────────────────────────
+# ── WebSocket server ───────────────────────────────────────────────────────────
 
 class SpeechServer:
     def __init__(self, config: dict):
@@ -113,10 +112,9 @@ class SpeechServer:
         self.engine = SpeechEngine(config, self._on_engine_event)
         self.logger = logging.getLogger("SpeechServer")
 
-    # ── Engine → broadcast ────────────────────────────────────────────────────
+    # ── Engine -> broadcast ───────────────────────────────────────────────────
 
     def _on_engine_event(self, event: dict):
-        """Called from the engine thread; schedules a broadcast on the event loop."""
         if self.loop and self.loop.is_running():
             asyncio.run_coroutine_threadsafe(self._broadcast(event), self.loop)
 
@@ -138,10 +136,7 @@ class SpeechServer:
         addr = websocket.remote_address
         self.logger.info(f"Client connected: {addr}")
         self.clients.add(websocket)
-
-        # Send current status immediately on connect
         await websocket.send(json.dumps(self._status_event()))
-
         try:
             async for raw in websocket:
                 await self._dispatch(websocket, raw)
@@ -162,7 +157,7 @@ class SpeechServer:
             return
 
         cmd = msg.get("cmd", "")
-        ts = time.time()
+        ts  = time.time()
 
         if cmd == "start":
             self.engine.start()
@@ -184,45 +179,47 @@ class SpeechServer:
             await ws.send(json.dumps(self._status_event()))
 
         elif cmd == "config":
-            key = msg.get("key", "")
+            key   = msg.get("key", "")
             value = msg.get("value")
             ok = self.engine.update_config(key, value)
             await ws.send(json.dumps({
                 "event": "config_updated" if ok else "error",
-                "code": None if ok else "invalid_key",
-                "key": key,
+                "code":  None if ok else "invalid_key",
+                "key":   key,
                 "value": value,
-                "ts": ts,
+                "ts":    ts,
             }))
 
         else:
             await ws.send(json.dumps({
-                "event": "error",
-                "code": "unknown_command",
+                "event":   "error",
+                "code":    "unknown_command",
                 "message": f"Unknown command: '{cmd}'",
-                "ts": ts,
+                "ts":      ts,
             }))
 
     def _status_event(self) -> dict:
         return {
-            "event": "status",
-            "state": self.engine.state.value,
+            "event":             "status",
+            "state":             self.engine.state.value,
             "wake_word_enabled": self.config["wake_word"]["enabled"],
-            "keywords": self.config["wake_word"].get("keywords", []),
-            "ts": time.time(),
+            "keywords":          self.config["wake_word"].get("keywords", []),
+            "ts":                time.time(),
         }
 
     # ── Server lifecycle ──────────────────────────────────────────────────────
 
     async def run(self):
         self.loop = asyncio.get_running_loop()
-        self.engine.start()
+
+        # NOTE: engine is NOT started automatically.
+        # The microphone is opened only when the client sends {"cmd": "start"}.
 
         host = self.config["host"]
         port = self.config["port"]
-        ww = self.config["wake_word"]
+        ww   = self.config["wake_word"]
 
-        border = "=" * 52
+        border = "=" * 54
         self.logger.info(border)
         self.logger.info("  Speech Recognition WebSocket Service")
         self.logger.info(f"  ws://{host}:{port}")
@@ -232,12 +229,23 @@ class SpeechServer:
         self.logger.info(f"  ASR model : {self.config['asr']['model_path']}")
         self.logger.info(border)
 
-        async with websockets.serve(self._handle_client, host, port):
-            self.logger.info("Server ready. Press Ctrl+C to stop.")
-            await asyncio.Future()  # run forever
+        try:
+            async with websockets.serve(self._handle_client, host, port):
+                self.logger.info(
+                    "Server ready.  Open index.html to connect.  Ctrl+C to stop."
+                )
+                # Periodically yield so Python's signal handler can run on Windows.
+                while True:
+                    await asyncio.sleep(0.5)
+        except (asyncio.CancelledError, KeyboardInterrupt):
+            pass
+        finally:
+            self.logger.info("Shutting down engine...")
+            self.engine.stop()
+            self.logger.info("Server stopped.")
 
 
-# ── Entry point ───────────────────────────────────────────────────────────────
+# ── Entry point ────────────────────────────────────────────────────────────────
 
 def main():
     config = load_config()
@@ -246,7 +254,7 @@ def main():
     try:
         asyncio.run(server.run())
     except KeyboardInterrupt:
-        logging.getLogger(__name__).info("Server stopped by user.")
+        pass
 
 
 if __name__ == "__main__":

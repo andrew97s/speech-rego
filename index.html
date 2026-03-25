@@ -29,53 +29,53 @@
     display: flex;
     flex-direction: column;
     align-items: center;
-    padding: 24px 16px;
+    padding: 24px 16px 40px;
   }
 
   h1 {
-    font-size: 1.35rem;
+    font-size: 1.25rem;
     font-weight: 600;
     letter-spacing: .02em;
     color: #fff;
-    margin-bottom: 24px;
+    margin-bottom: 20px;
   }
 
-  /* ─── Layout ─────────────────────────────────────────────── */
+  /* ── Layout ──────────────────────────────────────────────────── */
   .layout {
     width: 100%;
-    max-width: 860px;
+    max-width: 900px;
     display: grid;
-    grid-template-columns: 280px 1fr;
+    grid-template-columns: 290px 1fr;
     grid-template-rows: auto 1fr;
-    gap: 16px;
+    gap: 14px;
   }
-  @media (max-width: 640px) {
+  @media (max-width: 660px) {
     .layout { grid-template-columns: 1fr; }
   }
 
-  /* ─── Card ──────────────────────────────────────────────── */
+  /* ── Card ────────────────────────────────────────────────────── */
   .card {
     background: var(--surface);
     border: 1px solid var(--border);
     border-radius: var(--radius);
-    padding: 18px;
+    padding: 16px;
   }
   .card-title {
-    font-size: .75rem;
-    font-weight: 600;
+    font-size: .7rem;
+    font-weight: 700;
     text-transform: uppercase;
-    letter-spacing: .08em;
+    letter-spacing: .1em;
     color: var(--muted);
-    margin-bottom: 14px;
+    margin-bottom: 12px;
   }
 
-  /* ─── Connection bar ────────────────────────────────────── */
+  /* ── Connection bar ──────────────────────────────────────────── */
   .conn-bar {
     grid-column: 1 / -1;
     display: flex;
     align-items: center;
     gap: 10px;
-    padding: 12px 16px;
+    padding: 10px 14px;
   }
   .conn-bar input {
     flex: 1;
@@ -87,10 +87,11 @@
     font-size: .875rem;
     font-family: 'Cascadia Code', 'Consolas', monospace;
     outline: none;
+    min-width: 0;
   }
   .conn-bar input:focus { border-color: var(--primary); }
 
-  /* ─── Dot indicator ─────────────────────────────────────── */
+  /* ── Dot indicator ───────────────────────────────────────────── */
   .dot {
     width: 10px; height: 10px;
     border-radius: 50%;
@@ -100,268 +101,215 @@
   }
   .dot.connected  { background: var(--success); box-shadow: 0 0 6px var(--success); }
   .dot.connecting { background: var(--warn);    animation: pulse 1s infinite; }
-  .dot.error      { background: var(--danger);  }
+  .dot.error      { background: var(--danger); }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.3} }
 
-  @keyframes pulse {
-    0%,100% { opacity: 1; }
-    50%      { opacity: .3; }
-  }
-
-  /* ─── Buttons ──────────────────────────────────────────── */
+  /* ── Buttons ─────────────────────────────────────────────────── */
   .btn {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    gap: 6px;
-    border: none;
-    border-radius: 7px;
-    padding: 9px 16px;
-    font-size: .875rem;
-    font-weight: 500;
-    cursor: pointer;
-    transition: opacity .15s, transform .1s;
-    user-select: none;
+    display: inline-flex; align-items: center; justify-content: center; gap: 5px;
+    border: none; border-radius: 7px; padding: 8px 15px;
+    font-size: .875rem; font-weight: 500;
+    cursor: pointer; transition: opacity .15s, transform .1s; user-select: none;
+    white-space: nowrap;
   }
   .btn:active { transform: scale(.96); }
-  .btn:disabled { opacity: .38; cursor: not-allowed; transform: none; }
-
-  .btn-primary  { background: var(--primary);  color: #fff; }
-  .btn-primary:hover:not(:disabled)  { background: var(--primary-d); }
-  .btn-success  { background: var(--success);  color: #0a2a1e; }
-  .btn-success:hover:not(:disabled)  { filter: brightness(1.1); }
-  .btn-danger   { background: var(--danger);   color: #fff; }
-  .btn-danger:hover:not(:disabled)   { filter: brightness(1.1); }
-  .btn-ghost    { background: transparent; border: 1px solid var(--border); color: var(--muted); }
-  .btn-ghost:hover:not(:disabled)    { border-color: var(--text); color: var(--text); }
-
-  .btn-connect    { min-width: 90px; }
-  .btn-sm         { padding: 5px 10px; font-size: .8rem; }
-
-  .btn-group {
-    display: flex;
-    flex-direction: column;
-    gap: 10px;
-  }
-  .btn-row {
-    display: flex;
-    gap: 8px;
-  }
+  .btn:disabled { opacity: .35; cursor: not-allowed; transform: none; }
+  .btn-primary { background: var(--primary); color: #fff; }
+  .btn-primary:hover:not(:disabled) { background: var(--primary-d); }
+  .btn-success { background: var(--success); color: #0a2a1e; }
+  .btn-success:hover:not(:disabled) { filter: brightness(1.1); }
+  .btn-danger  { background: var(--danger);  color: #fff; }
+  .btn-danger:hover:not(:disabled)  { filter: brightness(1.1); }
+  .btn-ghost   { background: transparent; border: 1px solid var(--border); color: var(--muted); }
+  .btn-ghost:hover:not(:disabled)   { border-color: var(--text); color: var(--text); }
+  .btn-connect { min-width: 80px; }
+  .btn-sm      { padding: 4px 9px; font-size: .78rem; }
+  .btn-group   { display: flex; flex-direction: column; gap: 8px; }
+  .btn-row     { display: flex; gap: 8px; }
   .btn-row .btn { flex: 1; }
 
-  /* ─── State badge ──────────────────────────────────────── */
+  /* ── State badge ─────────────────────────────────────────────── */
   .state-badge {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    padding: 5px 12px;
-    border-radius: 20px;
-    font-size: .8rem;
-    font-weight: 600;
-    border: 1px solid transparent;
-    transition: all .3s;
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 4px 12px; border-radius: 20px;
+    font-size: .78rem; font-weight: 600;
+    border: 1px solid transparent; transition: all .3s;
   }
-  .state-stopped   { background:#1e1e28; border-color: var(--border); color: var(--muted); }
-  .state-idle      { background:#1a2b1e; border-color: var(--success); color: var(--success); }
-  .state-listening { background:#1a2240; border-color: var(--primary); color: var(--primary);
+  .state-stopped   { background:#1e1e28; border-color:var(--border);  color:var(--muted); }
+  .state-nodevice  { background:#2a1a1a; border-color:var(--danger);  color:var(--danger); }
+  .state-idle      { background:#1a2b1e; border-color:var(--success); color:var(--success); }
+  .state-listening { background:#1a2240; border-color:var(--primary); color:var(--primary);
                      animation: glow 1.5s ease-in-out infinite; }
-
   @keyframes glow {
-    0%,100% { box-shadow: none; }
-    50%      { box-shadow: 0 0 12px rgba(79,142,247,.4); }
+    0%,100%{box-shadow:none}
+    50%{box-shadow:0 0 12px rgba(79,142,247,.4)}
   }
 
-  /* ─── Waveform animation ────────────────────────────────── */
+  /* ── Waveform (fixed size to avoid layout shift) ─────────────── */
   .wave {
-    display: none;
-    align-items: flex-end;
-    gap: 3px;
-    height: 20px;
+    display: inline-flex; align-items: flex-end; gap: 3px;
+    height: 20px; width: 29px; flex-shrink: 0;
   }
-  .wave.active { display: flex; }
   .wave span {
-    display: block;
-    width: 3px;
-    border-radius: 2px;
+    display: block; width: 3px; border-radius: 2px;
     background: var(--primary);
-    animation: wave-bar 1s ease-in-out infinite;
+    transform-origin: bottom;
+    transition: opacity .2s;
   }
-  .wave span:nth-child(1) { animation-delay: 0s;    height: 6px; }
-  .wave span:nth-child(2) { animation-delay: .15s;  height: 12px; }
-  .wave span:nth-child(3) { animation-delay: .3s;   height: 18px; }
-  .wave span:nth-child(4) { animation-delay: .45s;  height: 12px; }
-  .wave span:nth-child(5) { animation-delay: .6s;   height: 6px; }
+  .wave span:nth-child(1){height:6px}
+  .wave span:nth-child(2){height:12px}
+  .wave span:nth-child(3){height:18px}
+  .wave span:nth-child(4){height:12px}
+  .wave span:nth-child(5){height:6px}
+  .wave.inactive span { animation: none; opacity: .15; }
+  .wave.active   span { animation: wave-bar 1s ease-in-out infinite; opacity: 1; }
+  .wave span:nth-child(1){animation-delay:0s}
+  .wave span:nth-child(2){animation-delay:.15s}
+  .wave span:nth-child(3){animation-delay:.3s}
+  .wave span:nth-child(4){animation-delay:.45s}
+  .wave span:nth-child(5){animation-delay:.6s}
+  @keyframes wave-bar { 0%,100%{transform:scaleY(1)} 50%{transform:scaleY(.25)} }
 
-  @keyframes wave-bar {
-    0%,100% { transform: scaleY(1); }
-    50%      { transform: scaleY(.3); }
+  /* ── Wake / status indicator ─────────────────────────────────── */
+  .status-indicator {
+    display: flex; align-items: center; gap: 8px;
+    padding: 9px 12px; border-radius: 8px;
+    background: #1a2a1e; border: 1px solid var(--border);
+    font-size: .82rem; transition: all .35s;
+    margin-bottom: 12px; min-height: 42px;
   }
-
-  /* ─── Wake word flash ───────────────────────────────────── */
-  .wake-indicator {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 10px 14px;
-    border-radius: 8px;
-    background: #1a2a1e;
-    border: 1px solid var(--border);
-    font-size: .85rem;
-    transition: all .3s;
-    margin-bottom: 14px;
+  .status-indicator.flash {
+    background: #1a3d1e; border-color: var(--success);
+    animation: flash-in .6s ease-out forwards;
   }
-  .wake-indicator.flash {
-    background: #1a3d1e;
-    border-color: var(--success);
-    animation: flash-in .6s ease-out;
+  .status-indicator.no-device {
+    background: #2a1a1a; border-color: var(--danger);
+  }
+  .status-indicator.listening-active {
+    background: #1a2240; border-color: var(--primary);
   }
   @keyframes flash-in {
-    0%   { background: #2a7a3e; border-color: var(--success); }
-    100% { background: #1a3d1e; border-color: var(--success); }
+    0%{background:#2a6a3e;border-color:var(--success)}
+    100%{background:#1a3d1e;border-color:var(--success)}
   }
-  .wake-icon { font-size: 1.1rem; }
+  .si-icon { font-size: 1rem; flex-shrink: 0; }
 
-  /* ─── Config panel ───────────────────────────────────────── */
+  /* ── Config panel ────────────────────────────────────────────── */
   .config-row {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    margin-bottom: 10px;
+    display: flex; align-items: center; gap: 8px; margin-bottom: 8px;
   }
   .config-row label {
-    font-size: .8rem;
-    color: var(--muted);
-    width: 80px;
-    flex-shrink: 0;
+    font-size: .78rem; color: var(--muted); width: 72px; flex-shrink: 0;
   }
   .config-row input[type=text],
   .config-row input[type=number],
   .config-row select {
-    flex: 1;
-    background: var(--bg);
-    border: 1px solid var(--border);
-    border-radius: 5px;
-    padding: 5px 9px;
-    color: var(--text);
-    font-size: .8rem;
-    outline: none;
+    flex: 1; min-width: 0;
+    background: var(--bg); border: 1px solid var(--border);
+    border-radius: 5px; padding: 5px 8px;
+    color: var(--text); font-size: .8rem; outline: none;
   }
   .config-row input:focus,
   .config-row select:focus { border-color: var(--primary); }
   .config-row input[type=range] { flex: 1; accent-color: var(--primary); }
-  .range-val { font-size: .8rem; color: var(--muted); min-width: 28px; text-align: right; }
+  .range-val { font-size: .78rem; color: var(--muted); min-width: 28px; text-align: right; }
+  .config-hint {
+    font-size: .72rem; color: var(--muted);
+    margin: -4px 0 8px 80px;
+    padding: 4px 8px; border-radius: 4px;
+    border-left: 2px solid var(--border);
+  }
 
-  /* ─── Transcript area ───────────────────────────────────── */
+  /* ── Left panel ──────────────────────────────────────────────── */
+  .left-panel {
+    grid-row: 2;
+    grid-column: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    min-width: 0;
+  }
+  @media (max-width: 660px) {
+    .left-panel { grid-column: 1; grid-row: auto; }
+  }
+
+  /* ── Transcript area ─────────────────────────────────────────── */
   .transcript-wrap {
     grid-row: 2;
     grid-column: 2;
     display: flex;
     flex-direction: column;
-    min-height: 340px;
+    gap: 10px;
+    min-width: 0;
   }
-  @media (max-width: 640px) {
+  @media (max-width: 660px) {
     .transcript-wrap { grid-column: 1; grid-row: auto; }
   }
 
   .transcript-box {
     flex: 1;
-    background: var(--bg);
-    border-radius: 8px;
-    padding: 14px;
-    font-size: .9rem;
-    line-height: 1.7;
-    overflow-y: auto;
-    min-height: 160px;
-    max-height: 280px;
-    border: 1px solid var(--border);
+    background: var(--bg); border: 1px solid var(--border);
+    border-radius: 8px; padding: 12px;
+    font-size: .88rem; line-height: 1.75;
+    overflow-y: auto; min-height: 200px; max-height: 360px;
   }
-  .transcript-box .entry {
-    display: flex;
-    gap: 8px;
-    margin-bottom: 8px;
+  .entry {
+    display: flex; gap: 8px; margin-bottom: 6px;
+    animation: entry-in .2s ease-out;
   }
-  .transcript-box .entry .ts {
-    color: var(--muted);
-    font-size: .75rem;
-    flex-shrink: 0;
-    padding-top: 2px;
-    font-family: monospace;
+  @keyframes entry-in { from{opacity:0;transform:translateY(4px)} to{opacity:1;transform:none} }
+  .entry .ts {
+    color: var(--muted); font-size: .72rem; flex-shrink: 0;
+    padding-top: 3px; font-family: monospace;
   }
-  .transcript-box .entry .txt { flex: 1; }
-  .entry.partial .txt { color: var(--muted); font-style: italic; }
-  .entry.final   .txt { color: var(--text); font-weight: 500; }
-
+  .entry .txt  { flex: 1; }
+  .entry.final .txt { color: var(--text); font-weight: 500; }
   .partial-live {
-    color: var(--muted);
-    font-style: italic;
-    padding: 4px 0;
-    min-height: 1.5em;
+    color: var(--muted); font-style: italic; min-height: 1.4em; padding: 2px 0;
   }
-
   .transcript-actions {
-    display: flex;
-    justify-content: flex-end;
-    gap: 8px;
-    margin-top: 8px;
+    display: flex; justify-content: flex-end; gap: 8px;
   }
 
-  /* ─── Event log ─────────────────────────────────────────── */
+  /* ── Event log ───────────────────────────────────────────────── */
   .log-box {
-    background: var(--bg);
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    padding: 10px 12px;
+    background: var(--bg); border: 1px solid var(--border);
+    border-radius: 8px; padding: 8px 12px;
     font-family: 'Cascadia Code', 'Consolas', monospace;
-    font-size: .75rem;
-    overflow-y: auto;
-    max-height: 160px;
-    margin-top: 10px;
+    font-size: .72rem; overflow-y: auto; max-height: 150px;
     color: var(--muted);
   }
-  .log-box .log-line { margin-bottom: 2px; white-space: pre-wrap; word-break: break-all; }
-  .log-box .log-line.ev-wake_word      { color: var(--success); }
-  .log-box .log-line.ev-transcript     { color: #7ecfff; }
-  .log-box .log-line.ev-error          { color: var(--danger); }
-  .log-box .log-line.ev-listening_start{ color: var(--primary); }
+  .log-line { margin-bottom: 1px; white-space: pre-wrap; word-break: break-all; }
+  .log-line.ev-wake_word       { color: var(--success); }
+  .log-line.ev-transcript      { color: #7ecfff; }
+  .log-line.ev-error           { color: var(--danger); }
+  .log-line.ev-listening_start { color: var(--primary); }
+  .log-line.ev-system          { color: var(--muted); }
 
-  /* ─── Mode hint ─────────────────────────────────────────── */
-  .mode-hint {
-    font-size: .75rem;
-    margin: -6px 0 10px 88px;
-    padding: 5px 10px;
-    border-radius: 5px;
-    border-left: 3px solid var(--border);
-    color: var(--muted);
-  }
+  /* ── Mode hint ───────────────────────────────────────────────── */
   .hint-vosk         { border-color: var(--primary); color: #8ab4f8; }
   .hint-openwakeword { border-color: var(--warn);    color: var(--warn); }
   .hint-auto         { border-color: var(--success); color: var(--success); }
 
-  /* ─── Send cmd ──────────────────────────────────────────── */
-  .raw-row {
-    display: flex;
-    gap: 8px;
-    margin-top: 10px;
-  }
+  /* ── Raw send ────────────────────────────────────────────────── */
+  .raw-row { display: flex; gap: 8px; }
   .raw-row input {
-    flex: 1;
-    background: var(--bg);
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    padding: 6px 10px;
-    color: var(--text);
-    font-family: monospace;
-    font-size: .8rem;
-    outline: none;
+    flex: 1; min-width: 0;
+    background: var(--bg); border: 1px solid var(--border);
+    border-radius: 6px; padding: 6px 10px;
+    color: var(--text); font-family: monospace; font-size: .78rem; outline: none;
   }
   .raw-row input:focus { border-color: var(--primary); }
 
-  /* ─── Scroll to bottom ──────────────────────────────────── */
   .scroll-anchor { height: 1px; }
+
+  /* ── Mode selector hint colours ──────────────────────────────── */
+  #modeHint { border-left-width: 2px; }
 </style>
 </head>
 <body>
 
-<h1>🎙️ 语音识别控制台</h1>
+<h1>&#127908; 语音识别控制台</h1>
 
 <div class="layout">
 
@@ -373,36 +321,36 @@
   </div>
 
   <!-- Left panel -->
-  <div style="display:flex;flex-direction:column;gap:16px;">
+  <div class="left-panel">
 
     <!-- Status & controls -->
     <div class="card">
       <div class="card-title">状态与控制</div>
 
-      <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px;">
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px;">
         <span class="state-badge state-stopped" id="stateBadge">
-          <span id="stateDot">⬤</span> <span id="stateText">未连接</span>
+          <span id="stateText">未连接</span>
         </span>
-        <div class="wave" id="wave">
+        <div class="wave inactive" id="wave">
           <span></span><span></span><span></span><span></span><span></span>
         </div>
       </div>
 
-      <div class="wake-indicator" id="wakeIndicator">
-        <span class="wake-icon">👂</span>
-        <span id="wakeText">等待唤醒词...</span>
+      <div class="status-indicator" id="statusIndicator">
+        <span class="si-icon" id="siIcon">&#128100;</span>
+        <span id="siText">就绪，点击「连接」开始。</span>
       </div>
 
       <div class="btn-group">
         <div class="btn-row">
-          <button class="btn btn-success" id="btnStart" onclick="sendCmd('start')" disabled>▶ 启动</button>
-          <button class="btn btn-danger"  id="btnStop"  onclick="sendCmd('stop')"  disabled>■ 停止</button>
+          <button class="btn btn-success" id="btnStart"  onclick="sendCmd('start')"  disabled>&#9654; 启动</button>
+          <button class="btn btn-danger"  id="btnStop"   onclick="sendCmd('stop')"   disabled>&#9632; 停止</button>
         </div>
         <button class="btn btn-primary" id="btnListen" onclick="sendCmd('listen')" disabled>
-          🎤 手动触发录音
+          &#127908; 手动触发录音
         </button>
         <button class="btn btn-ghost"   id="btnCancel" onclick="sendCmd('cancel')" disabled>
-          ✕ 取消录音
+          &#10005; 取消录音
         </button>
       </div>
     </div>
@@ -411,7 +359,6 @@
     <div class="card">
       <div class="card-title">运行时配置</div>
 
-      <!-- Mode selector -->
       <div class="config-row">
         <label>检测模式</label>
         <select id="cfgMode" onchange="applyMode()">
@@ -420,18 +367,17 @@
           <option value="openwakeword">openwakeword（英文）</option>
         </select>
       </div>
-      <div id="modeHint" class="mode-hint hint-vosk">
-        vosk 模式：使用语音模型关键词检测，支持任意中文词组（如"你好小智"）
+      <div id="modeHint" class="config-hint hint-vosk">
+        vosk: 语音模型关键词检测，支持任意中文词（如"你好小智"）
       </div>
 
-      <!-- Keyword input -->
       <div class="config-row">
         <label>唤醒词</label>
         <input type="text" id="cfgKeyword" value="你好小智" placeholder="你好小智 或 hey_jarvis">
         <button class="btn btn-ghost btn-sm" onclick="applyKeyword()">应用</button>
       </div>
-      <div style="font-size:.75rem;color:var(--muted);margin:-6px 0 10px 88px;">
-        多个词用英文逗号分隔，如：<code style="color:var(--primary)">你好小智,开始录音</code>
+      <div class="config-hint" style="border-color:var(--border)">
+        多个词用英文逗号分隔：<code style="color:var(--primary)">你好小智,开始录音</code>
       </div>
 
       <div class="config-row">
@@ -441,30 +387,31 @@
         <span class="range-val" id="cfgSensVal">0.5</span>
         <button class="btn btn-ghost btn-sm" onclick="applySensitivity()">应用</button>
       </div>
-      <div style="font-size:.75rem;color:var(--muted);margin:-6px 0 10px 88px;">
-        仅对 openwakeword 模式有效
+      <div class="config-hint" style="border-color:var(--border)">
+        仅 openwakeword 模式有效
       </div>
 
       <div class="config-row">
-        <label>唤醒词</label>
-        <label style="width:auto;color:var(--text)">
+        <label>启用</label>
+        <label style="width:auto;color:var(--text);font-size:.82rem;">
           <input type="checkbox" id="cfgWWEnabled" checked
                  onchange="sendConfigBool('wake_word.enabled', this.checked)">
-          启用（关闭则检测到声音即开始识别）
+          &nbsp;唤醒词检测（关闭则有声音即开始识别）
         </label>
       </div>
 
-      <div class="config-row">
+      <div class="config-row" style="margin-top:4px;">
         <label>静音超时</label>
         <input type="number" id="cfgSilence" value="1500" min="500" max="5000" step="100">
         <span style="font-size:.75rem;color:var(--muted)">ms</span>
         <button class="btn btn-ghost btn-sm" onclick="applySilenceMs()">应用</button>
       </div>
-    </div>
+
+    </div><!-- /config card -->
 
   </div><!-- /left panel -->
 
-  <!-- Transcript -->
+  <!-- Right: transcript + log -->
   <div class="card transcript-wrap">
     <div class="card-title">识别结果</div>
     <div class="transcript-box" id="transcriptBox">
@@ -472,18 +419,16 @@
       <div class="scroll-anchor" id="scrollAnchor"></div>
     </div>
     <div class="transcript-actions">
-      <button class="btn btn-ghost btn-sm" onclick="copyTranscripts()">📋 复制全部</button>
-      <button class="btn btn-ghost btn-sm" onclick="clearTranscripts()">🗑 清空</button>
+      <button class="btn btn-ghost btn-sm" onclick="copyTranscripts()">&#128203; 复制全部</button>
+      <button class="btn btn-ghost btn-sm" onclick="clearTranscripts()">&#128465; 清空</button>
     </div>
 
-    <!-- Event log -->
-    <div class="card-title" style="margin-top:14px;">事件日志</div>
+    <div class="card-title" style="margin-top:12px;">事件日志</div>
     <div class="log-box" id="logBox"></div>
 
-    <!-- Raw command input -->
-    <div class="raw-row">
-      <input id="rawCmd" type="text" placeholder='发送原始命令 JSON，如 {"cmd":"status"}'
-             onkeydown="if(event.key==='Enter') sendRaw()">
+    <div class="raw-row" style="margin-top:8px;">
+      <input id="rawCmd" type="text" placeholder='原始 JSON，如 {"cmd":"status"}'
+             onkeydown="if(event.key==='Enter')sendRaw()">
       <button class="btn btn-ghost btn-sm" onclick="sendRaw()">发送</button>
     </div>
   </div>
@@ -491,12 +436,12 @@
 </div><!-- /layout -->
 
 <script>
-  // ── State ────────────────────────────────────────────────────────────────────
+  // ── State ─────────────────────────────────────────────────────────────────────
   let ws = null;
   let engineState = 'stopped';
   let transcripts = [];
 
-  // ── Connect / Disconnect ─────────────────────────────────────────────────────
+  // ── Connect / disconnect ──────────────────────────────────────────────────────
   function toggleConnect() {
     if (ws && ws.readyState <= WebSocket.OPEN) {
       ws.close();
@@ -508,7 +453,7 @@
   function connect() {
     const url = document.getElementById('wsUrl').value.trim();
     setDot('connecting');
-    logEvent('system', `连接中 ${url} ...`);
+    logEvent('system', '连接中 ' + url + ' ...');
 
     ws = new WebSocket(url);
 
@@ -526,7 +471,7 @@
     };
 
     ws.onclose = () => {
-      setDot('disconnected');
+      setDot('');
       document.getElementById('btnConnect').textContent = '连接';
       setControlsEnabled(false);
       setEngineState('stopped');
@@ -541,14 +486,10 @@
   }
 
   // ── Send helpers ──────────────────────────────────────────────────────────────
-  function sendCmd(cmd) {
-    send({ cmd });
-  }
+  function sendCmd(cmd) { send({ cmd }); }
 
   function send(obj) {
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify(obj));
-    }
+    if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(obj));
   }
 
   function sendRaw() {
@@ -556,8 +497,7 @@
     const raw = input.value.trim();
     if (!raw) return;
     try {
-      const obj = JSON.parse(raw);
-      send(obj);
+      send(JSON.parse(raw));
       input.value = '';
     } catch {
       logEvent('error', '无效 JSON: ' + raw);
@@ -569,24 +509,23 @@
     const mode = document.getElementById('cfgMode').value;
     send({ cmd: 'config', key: 'wake_word.mode', value: mode });
     updateModeHint(mode);
-    logEvent('system', `唤醒模式已设为: ${mode}（重启服务后生效）`);
+    logEvent('system', '唤醒模式已设为: ' + mode + '（重启引擎后生效）');
   }
 
   function updateModeHint(mode) {
     const hints = {
-      auto:         'auto 模式：含中文关键词自动使用 Vosk，否则使用 openwakeword',
-      vosk:         'vosk 模式：使用语音模型关键词检测，支持任意中文词组（如"你好小智"）',
-      openwakeword: 'openwakeword 模式：英文预训练模型，可用词: hey_jarvis / alexa / hey_mycroft',
+      auto:         'auto: 含中文关键词自动用 Vosk，否则用 openwakeword',
+      vosk:         'vosk: 语音模型关键词检测，支持任意中文词（如"你好小智"）',
+      openwakeword: 'openwakeword: 英文预训练，可用词: hey_jarvis / alexa / hey_mycroft',
     };
     const el = document.getElementById('modeHint');
     el.textContent = hints[mode] || '';
-    el.className = `mode-hint hint-${mode}`;
+    el.className = 'config-hint hint-' + mode;
   }
 
   function applyKeyword() {
     const raw = document.getElementById('cfgKeyword').value.trim();
     if (!raw) return;
-    // Support comma-separated keywords: "你好小智, 开始录音" → ["你好小智","开始录音"]
     const kws = raw.split(',').map(s => s.trim()).filter(Boolean);
     send({ cmd: 'config', key: 'wake_word.keywords', value: kws });
   }
@@ -596,9 +535,7 @@
     send({ cmd: 'config', key: 'wake_word.sensitivity', value: v });
   }
 
-  function sendConfigBool(key, value) {
-    send({ cmd: 'config', key, value });
-  }
+  function sendConfigBool(key, value) { send({ cmd: 'config', key, value }); }
 
   function applySilenceMs() {
     const v = parseInt(document.getElementById('cfgSilence').value, 10);
@@ -608,24 +545,19 @@
   // ── Event handler ─────────────────────────────────────────────────────────────
   function handleEvent(msg) {
     const { event } = msg;
-
-    // Always log
     logEvent(event, formatEventLog(msg));
 
     if (event === 'status') {
       setEngineState(msg.state);
-      if (msg.wake_word_enabled !== undefined) {
+      if (msg.wake_word_enabled !== undefined)
         document.getElementById('cfgWWEnabled').checked = msg.wake_word_enabled;
-      }
       if (msg.mode) {
         const sel = document.getElementById('cfgMode');
         if (sel.value !== msg.mode) sel.value = msg.mode;
         updateModeHint(msg.mode);
       }
-      if (msg.keywords && msg.keywords.length) {
-        const kwInput = document.getElementById('cfgKeyword');
-        kwInput.value = msg.keywords.join(', ');
-      }
+      if (msg.keywords && msg.keywords.length)
+        document.getElementById('cfgKeyword').value = msg.keywords.join(', ');
 
     } else if (event === 'wake_word') {
       flashWake(msg.keyword, msg.score);
@@ -645,50 +577,87 @@
       addTranscript(msg.text);
 
     } else if (event === 'config_updated') {
-      logEvent('system', `配置已更新: ${msg.key} = ${JSON.stringify(msg.value)}`);
+      logEvent('system', '配置更新: ' + msg.key + ' = ' + JSON.stringify(msg.value));
 
     } else if (event === 'error') {
-      logEvent('error', `[${msg.code}] ${msg.message || ''}`);
+      logEvent('error', '[' + msg.code + '] ' + (msg.message || ''));
+      if (msg.code === 'no_device') {
+        // Reflect no_device in the indicator without overriding engine state badge
+        // (the engine should also emit a status event with state=no_device)
+        setSiText('&#128241;', msg.message || '未检测到麦克风');
+        document.getElementById('statusIndicator').classList.add('no-device');
+      }
     }
   }
 
   // ── UI helpers ────────────────────────────────────────────────────────────────
   function setDot(state) {
-    const dot = document.getElementById('dot');
-    dot.className = 'dot ' + (state === 'connected' ? 'connected' : state === 'connecting' ? 'connecting' : state === 'error' ? 'error' : '');
+    document.getElementById('dot').className =
+      'dot' + (state ? ' ' + state : '');
   }
+
+  const STATE_LABELS = {
+    stopped:   '已停止',
+    no_device: '无麦克风',
+    idle:      '待机中',
+    listening: '录音中',
+  };
+
+  const STATE_SI = {
+    stopped:   ['&#9899;', '服务已停止，点击「启动」开启麦克风。'],
+    no_device: ['&#128241;', '未检测到麦克风，每 3 秒自动重试...'],
+    idle:      ['&#128066;', '等待唤醒词...'],
+    listening: ['&#127908;', '正在录音识别...'],
+  };
 
   function setEngineState(state) {
     engineState = state;
-    const badge = document.getElementById('stateBadge');
-    const text  = document.getElementById('stateText');
-    const wave  = document.getElementById('wave');
+    const badge    = document.getElementById('stateBadge');
+    const text     = document.getElementById('stateText');
+    const wave     = document.getElementById('wave');
+    const indicator= document.getElementById('statusIndicator');
 
-    badge.className = 'state-badge state-' + state;
-    text.textContent = { stopped: '已停止', idle: '待机中', listening: '录音中' }[state] || state;
-    wave.classList.toggle('active', state === 'listening');
+    const cssState = state === 'no_device' ? 'nodevice' : state;
+    badge.className = 'state-badge state-' + cssState;
+    text.textContent = STATE_LABELS[state] || state;
+    wave.className = 'wave ' + (state === 'listening' ? 'active' : 'inactive');
+
+    // Status indicator
+    const [icon, hint] = STATE_SI[state] || ['&#9679;', state];
+    setSiText(icon, hint);
+    indicator.classList.toggle('no-device',         state === 'no_device');
+    indicator.classList.toggle('listening-active',  state === 'listening');
+    if (state !== 'no_device') indicator.classList.remove('no-device');
+    if (state !== 'listening') indicator.classList.remove('listening-active');
 
     // Button states
     const connected = ws && ws.readyState === WebSocket.OPEN;
-    document.getElementById('btnStart').disabled  = !connected || state !== 'stopped';
-    document.getElementById('btnStop').disabled   = !connected || state === 'stopped';
-    document.getElementById('btnListen').disabled = !connected || state === 'stopped';
+    const isStopped = state === 'stopped';
+    const isRunning = !isStopped;  // idle, no_device, listening = engine active
+
+    document.getElementById('btnStart').disabled  = !connected || isRunning;
+    document.getElementById('btnStop').disabled   = !connected || isStopped;
+    document.getElementById('btnListen').disabled = !connected || state !== 'idle';
     document.getElementById('btnCancel').disabled = !connected || state !== 'listening';
   }
 
+  function setSiText(icon, text) {
+    document.getElementById('siIcon').innerHTML = icon;
+    document.getElementById('siText').textContent = text;
+  }
+
   function setControlsEnabled(on) {
-    ['btnStart','btnStop','btnListen','btnCancel'].forEach(id => {
-      document.getElementById(id).disabled = !on;
-    });
+    ['btnStart','btnStop','btnListen','btnCancel'].forEach(id =>
+      document.getElementById(id).disabled = !on
+    );
     if (!on) setEngineState('stopped');
   }
 
   function flashWake(keyword, score) {
-    const el = document.getElementById('wakeIndicator');
-    const txt = document.getElementById('wakeText');
-    txt.textContent = `检测到唤醒词: ${keyword} (${(score * 100).toFixed(0)}%)`;
+    setSiText('&#9889;', '检测到唤醒词: ' + keyword + ' (' + (score * 100).toFixed(0) + '%)');
+    const el = document.getElementById('statusIndicator');
     el.classList.remove('flash');
-    void el.offsetWidth; // reflow
+    void el.offsetWidth;
     el.classList.add('flash');
   }
 
@@ -702,21 +671,22 @@
 
   function addTranscript(text) {
     transcripts.push(text);
-    const box = document.getElementById('transcriptBox');
+    const box   = document.getElementById('transcriptBox');
     const entry = document.createElement('div');
     entry.className = 'entry final';
-    const ts = new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-    entry.innerHTML = `<span class="ts">${ts}</span><span class="txt">${escHtml(text)}</span>`;
-    // Insert before partial/anchor
+    const ts = new Date().toLocaleTimeString('zh-CN',
+      {hour:'2-digit', minute:'2-digit', second:'2-digit'});
+    entry.innerHTML =
+      '<span class="ts">' + ts + '</span>' +
+      '<span class="txt">' + escHtml(text) + '</span>';
     box.insertBefore(entry, document.getElementById('partialLive'));
     document.getElementById('scrollAnchor').scrollIntoView({ behavior: 'smooth' });
   }
 
   function clearTranscripts() {
     transcripts = [];
-    const box = document.getElementById('transcriptBox');
-    // Remove only .entry elements
-    box.querySelectorAll('.entry').forEach(el => el.remove());
+    document.getElementById('transcriptBox')
+      .querySelectorAll('.entry').forEach(el => el.remove());
     clearPartial();
   }
 
@@ -727,35 +697,32 @@
   }
 
   // ── Event log ────────────────────────────────────────────────────────────────
-  const MAX_LOG_LINES = 200;
-  let logLines = 0;
+  const MAX_LOG = 200;
+  let logCount  = 0;
 
   function logEvent(type, message) {
-    const box = document.getElementById('logBox');
+    const box  = document.getElementById('logBox');
     const line = document.createElement('div');
-    line.className = `log-line ev-${type}`;
-    const ts = new Date().toLocaleTimeString('zh-CN', { hour12: false });
-    line.textContent = `[${ts}] ${message}`;
+    line.className = 'log-line ev-' + type;
+    const ts = new Date().toLocaleTimeString('zh-CN', {hour12: false});
+    line.textContent = '[' + ts + '] ' + message;
     box.appendChild(line);
-    logLines++;
-    if (logLines > MAX_LOG_LINES) {
-      box.firstChild && box.removeChild(box.firstChild);
-    }
+    if (++logCount > MAX_LOG && box.firstChild) box.removeChild(box.firstChild);
     box.scrollTop = box.scrollHeight;
   }
 
   function formatEventLog(msg) {
     switch (msg.event) {
-      case 'status':        return `status: ${msg.state}`;
-      case 'wake_word':     return `wake_word: ${msg.keyword} (${(msg.score*100).toFixed(0)}%)`;
-      case 'listening_start': return `listening_start [${msg.trigger}]`;
-      case 'listening_end':   return `listening_end [${msg.reason}]`;
-      case 'partial':       return `partial: ${msg.text}`;
-      case 'transcript':    return `transcript: "${msg.text}"`;
-      case 'ack':           return `ack: ${msg.cmd}`;
-      case 'config_updated': return `config_updated: ${msg.key} = ${JSON.stringify(msg.value)}`;
-      case 'error':         return `error [${msg.code}]: ${msg.message || ''}`;
-      default:              return JSON.stringify(msg);
+      case 'status':          return 'status: ' + msg.state;
+      case 'wake_word':       return 'wake_word: ' + msg.keyword + ' (' + (msg.score*100).toFixed(0) + '%)';
+      case 'listening_start': return 'listening_start [' + msg.trigger + ']';
+      case 'listening_end':   return 'listening_end [' + msg.reason + ']';
+      case 'partial':         return 'partial: ' + msg.text;
+      case 'transcript':      return 'transcript: "' + msg.text + '"';
+      case 'ack':             return 'ack: ' + msg.cmd;
+      case 'config_updated':  return 'config_updated: ' + msg.key + ' = ' + JSON.stringify(msg.value);
+      case 'error':           return 'error [' + msg.code + ']: ' + (msg.message || '');
+      default:                return JSON.stringify(msg);
     }
   }
 
@@ -765,13 +732,7 @@
   }
 
   // ── Init ─────────────────────────────────────────────────────────────────────
-  document.getElementById('rawCmd').addEventListener('keydown', e => {
-    if (e.key === 'Enter') sendRaw();
-  });
-
-  // Init mode hint
   updateModeHint(document.getElementById('cfgMode').value);
-
   logEvent('system', '就绪，点击「连接」开始。');
 </script>
 </body>

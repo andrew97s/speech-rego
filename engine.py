@@ -1,13 +1,17 @@
 """
-Audio pipeline engine: microphone → wake word → ASR → events
+Audio pipeline engine: microphone -> wake word -> ASR -> events
 
 Wake word modes:
-  vosk         — Uses Vosk grammar/keyword-spotting (supports ANY language, including Chinese)
-  openwakeword — Uses openwakeword pre-trained ONNX models (English only)
-  auto         — Chinese keywords → vosk; ASCII keywords → openwakeword (fallback to vosk)
+  vosk         -- Uses Vosk grammar/keyword-spotting (supports Chinese)
+  openwakeword -- Uses openwakeword pre-trained ONNX models (English only)
+  auto         -- Chinese keywords -> vosk; ASCII keywords -> openwakeword
 
 State machine:
-  STOPPED → start() → IDLE → wake word / trigger → LISTENING → silence/timeout/cancel → IDLE
+  STOPPED -> start() -> NO_DEVICE (no mic) or IDLE (mic ok)
+  NO_DEVICE: retries every 3 s until mic appears
+  IDLE -> wake word / trigger -> LISTENING -> silence/timeout/cancel -> IDLE
+  IDLE/LISTENING: mic disconnected -> NO_DEVICE -> auto-retry
+  any state -> stop() -> STOPPED (mic released)
 """
 
 import json
@@ -23,11 +27,12 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
+_DEVICE_RETRY_SEC = 3.0   # seconds between mic open retries
+
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
 def _has_cjk(text: str) -> bool:
-    """True if text contains Chinese / Japanese / Korean characters."""
     return bool(re.search(r"[\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]", text))
 
 
@@ -40,23 +45,12 @@ def _resolve_mode(mode: str, keywords: List[str]) -> str:
 # ── Wake word detectors ────────────────────────────────────────────────────────
 
 class _VoskWakeWordDetector:
-    """
-    Keyword-spotting via Vosk grammar mode.
-    Works for any language supported by the loaded Vosk model (including Chinese).
-
-    How it works:
-      - A KaldiRecognizer is created with a restricted grammar (your keywords + "[unk]").
-      - Audio is fed continuously; when a final result matches a keyword, wake detected.
-      - A fresh recognizer is created after each detection to clear accumulated state.
-    """
-
     def __init__(self, model, sample_rate: int, keywords: List[str]):
-        import vosk  # noqa: F401 – checked at call site
         self._model = model
         self._sample_rate = sample_rate
         self.keywords = [kw.strip() for kw in keywords]
         self._make_rec()
-        logger.info(f"[WakeWord] Vosk mode — keywords: {self.keywords}")
+        logger.info(f"[WakeWord] Vosk mode -- keywords: {self.keywords}")
 
     def _make_rec(self):
         import vosk
@@ -65,31 +59,24 @@ class _VoskWakeWordDetector:
         self._rec.SetGrammar(grammar)
 
     def process(self, audio_bytes: bytes) -> Optional[str]:
-        """Feed a PCM int16 audio chunk. Returns detected keyword string or None."""
         if self._rec.AcceptWaveform(audio_bytes):
             result = json.loads(self._rec.Result())
             text = result.get("text", "").strip()
             if text and text != "[unk]" and text in self.keywords:
-                self._make_rec()   # reset for next detection
+                self._make_rec()
                 return text
         return None
 
 
 class _OpenWakeWordDetector:
-    """
-    Wake word detection via openwakeword pre-trained ONNX models (English keywords).
-    Supported keywords: hey_jarvis, alexa, hey_mycroft, hey_rhasspy, …
-    """
-
     def __init__(self, keywords: List[str], sensitivity: float):
         from openwakeword.model import Model  # type: ignore
         self.keywords = keywords
         self.sensitivity = sensitivity
         self._model = Model(wakeword_models=keywords, inference_framework="onnx")
-        logger.info(f"[WakeWord] OpenWakeWord mode — keywords: {keywords}")
+        logger.info(f"[WakeWord] OpenWakeWord mode -- keywords: {keywords}")
 
     def process(self, audio_f32: np.ndarray) -> Optional[str]:
-        """Feed float32 audio (normalised to ±1). Returns detected keyword or None."""
         scores: dict = self._model.predict(audio_f32)
         for kw in self.keywords:
             if float(scores.get(kw, 0.0)) >= self.sensitivity:
@@ -101,6 +88,7 @@ class _OpenWakeWordDetector:
 
 class EngineState(Enum):
     STOPPED   = "stopped"
+    NO_DEVICE = "no_device"   # running, waiting for microphone
     IDLE      = "idle"
     LISTENING = "listening"
 
@@ -139,15 +127,12 @@ class SpeechEngine:
         logger.info("Engine stopped")
 
     def trigger_listen(self):
-        """Manually start listening, bypassing wake word detection."""
         self._trigger_listen.set()
 
     def cancel_listen(self):
-        """Abort the current listening session."""
         self._cancel_listen.set()
 
     def update_config(self, key: str, value) -> bool:
-        """Update a config value at runtime via dot-notation key."""
         try:
             parts = key.split(".")
             cfg = self.config
@@ -166,12 +151,12 @@ class SpeechEngine:
         self.state = state
         ww = self.config["wake_word"]
         self.emit({
-            "event":            "status",
-            "state":            state.value,
+            "event":             "status",
+            "state":             state.value,
             "wake_word_enabled": ww.get("enabled", True),
-            "keywords":         ww.get("keywords", []),
-            "mode":             ww.get("mode", "auto"),
-            "ts":               time.time(),
+            "keywords":          ww.get("keywords", []),
+            "mode":              ww.get("mode", "auto"),
+            "ts":                time.time(),
         })
 
     def _run_safe(self):
@@ -199,8 +184,9 @@ class SpeechEngine:
         chunk_size:       int   = cfg_audio.get("chunk_size", 4000)
         max_listen_ms:    int   = cfg_asr.get("max_listen_ms", 30000)
         energy_threshold: float = cfg_audio.get("energy_threshold", 0.02)
+        device                  = cfg_audio.get("device") or None
 
-        # ── Load ASR model ────────────────────────────────────────────────────
+        # ── Load ASR model (once) ─────────────────────────────────────────────
         vosk.SetLogLevel(-1)
         model_path = cfg_asr["model_path"]
         logger.info(f"Loading ASR model: {model_path}")
@@ -211,19 +197,19 @@ class SpeechEngine:
                 "event": "error", "code": "model_not_found",
                 "message": (
                     f"ASR model not found: '{model_path}'. "
-                    "Run install.bat to download models."
+                    "Run the installer to download models."
                 ),
                 "ts": time.time(),
             })
             raise
         logger.info("ASR model loaded")
 
-        # ── Build wake word detector ──────────────────────────────────────────
-        ww_enabled: bool       = cfg_ww.get("enabled", True)
-        keywords:   List[str]  = cfg_ww.get("keywords", ["你好小智"])
-        sensitivity: float     = cfg_ww.get("sensitivity", 0.5)
-        mode_cfg               = cfg_ww.get("mode", "auto")
-        resolved_mode          = _resolve_mode(mode_cfg, keywords)
+        # ── Build wake word detector (once) ──────────────────────────────────
+        ww_enabled:    bool      = cfg_ww.get("enabled", True)
+        keywords:      List[str] = cfg_ww.get("keywords", ["你好小智"])
+        sensitivity:   float     = cfg_ww.get("sensitivity", 0.5)
+        mode_cfg                 = cfg_ww.get("mode", "auto")
+        resolved_mode            = _resolve_mode(mode_cfg, keywords)
 
         ww_detector = None
         if ww_enabled and keywords:
@@ -231,13 +217,12 @@ class SpeechEngine:
                 if resolved_mode == "vosk":
                     ww_detector = _VoskWakeWordDetector(asr_model, sample_rate, keywords)
                 else:
-                    # Try openwakeword; fall back to vosk on failure
                     try:
                         ww_detector = _OpenWakeWordDetector(keywords, sensitivity)
                     except Exception as oww_exc:
                         logger.warning(
                             f"OpenWakeWord failed ({oww_exc}), "
-                            "falling back to Vosk keyword-spotting mode."
+                            "falling back to Vosk keyword-spotting."
                         )
                         self.emit({
                             "event": "error", "code": "wake_word_fallback",
@@ -262,160 +247,223 @@ class SpeechEngine:
             + (f" [{resolved_mode}]" if ww_enabled else "")
         )
 
-        # ── Open microphone ───────────────────────────────────────────────────
-        audio_q: queue.Queue = queue.Queue(maxsize=200)
-
-        def audio_callback(indata, frames, time_info, status):
-            if status:
-                logger.debug(f"Audio status: {status}")
-            if audio_q.full():
-                try:
-                    audio_q.get_nowait()
-                except queue.Empty:
-                    pass
-            audio_q.put(bytes(indata))
-
-        device = cfg_audio.get("device") or None
-        try:
-            stream = sd.RawInputStream(
-                samplerate=sample_rate, blocksize=chunk_size,
-                device=device, dtype="int16", channels=1,
-                callback=audio_callback,
-            )
-        except Exception as exc:
-            self.emit({
-                "event": "error", "code": "mic_error",
-                "message": f"Cannot open microphone: {exc}",
-                "ts": time.time(),
-            })
-            raise
-
         def new_asr_rec():
             rec = vosk.KaldiRecognizer(asr_model, sample_rate)
             rec.SetWords(True)
             rec.SetPartialWords(True)
             return rec
 
-        # ── State machine loop ────────────────────────────────────────────────
-        with stream:
-            logger.info("Microphone open. Engine running.")
-            self._set_state(EngineState.IDLE)
+        # ── Hot-plug device loop ──────────────────────────────────────────────
+        while not self._stop_event.is_set():
 
-            asr_rec    = new_asr_rec()
-            listen_start: Optional[float] = None
-            last_partial  = ""
+            # Build a fresh audio queue for each device open attempt
+            audio_q: queue.Queue = queue.Queue(maxsize=200)
 
-            while not self._stop_event.is_set():
+            def _audio_cb(indata, frames, time_info, status,
+                          _q=audio_q):  # default-arg captures current queue
+                if status:
+                    logger.debug(f"Audio status: {status}")
+                if _q.full():
+                    try:
+                        _q.get_nowait()
+                    except queue.Empty:
+                        pass
+                _q.put(bytes(indata))
 
-                # Get audio chunk
-                try:
-                    audio_bytes = audio_q.get(timeout=0.2)
-                except queue.Empty:
-                    # Timeout guard while listening
-                    if self.state == EngineState.LISTENING and listen_start is not None:
-                        if (time.time() - listen_start) * 1000 >= max_listen_ms:
-                            self._finalize(asr_rec, "timeout")
-                            asr_rec      = new_asr_rec()
-                            listen_start = None
-                            last_partial = ""
-                            self._set_state(EngineState.IDLE)
-                    continue
+            # Try to open the microphone
+            try:
+                stream = sd.RawInputStream(
+                    samplerate=sample_rate, blocksize=chunk_size,
+                    device=device, dtype="int16", channels=1,
+                    callback=_audio_cb,
+                )
+            except Exception as exc:
+                if self.state != EngineState.NO_DEVICE:
+                    logger.warning(f"Cannot open microphone: {exc}")
+                    self.emit({
+                        "event": "error", "code": "no_device",
+                        "message": (
+                            f"Microphone not available: {exc}. "
+                            f"Retrying every {int(_DEVICE_RETRY_SEC)} s..."
+                        ),
+                        "ts": time.time(),
+                    })
+                    self._set_state(EngineState.NO_DEVICE)
+                # Wait before retrying; honours stop_event
+                if self._stop_event.wait(_DEVICE_RETRY_SEC):
+                    break
+                continue
 
-                audio_np = np.frombuffer(audio_bytes, dtype=np.int16)
+            # ── Per-device audio processing loop ─────────────────────────────
+            device_error: Optional[str] = None
+            try:
+                with stream:
+                    logger.info("Microphone open. Engine running.")
+                    self._set_state(EngineState.IDLE)
 
-                # ── IDLE ──────────────────────────────────────────────────────
-                if self.state == EngineState.IDLE:
+                    asr_rec      = new_asr_rec()
+                    listen_start: Optional[float] = None
+                    last_partial  = ""
 
-                    # Manual trigger
-                    if self._trigger_listen.is_set():
-                        self._trigger_listen.clear()
-                        asr_rec      = new_asr_rec()
-                        listen_start = time.time()
-                        last_partial = ""
-                        self.emit({"event": "listening_start", "trigger": "manual", "ts": time.time()})
-                        self._set_state(EngineState.LISTENING)
-                        continue
+                    while not self._stop_event.is_set():
 
-                    if ww_enabled and ww_detector is not None:
-                        # Wake word detection
-                        if resolved_mode == "vosk":
-                            detected = ww_detector.process(audio_bytes)
-                        else:
-                            audio_f32 = audio_np.astype(np.float32) / 32768.0
-                            detected  = ww_detector.process(audio_f32)
+                        # Detect silent device removal
+                        if not stream.active:
+                            device_error = "Stream became inactive (device removed?)"
+                            break
 
-                        if detected:
-                            logger.info(f"Wake word: '{detected}'")
-                            self.emit({
-                                "event": "wake_word", "keyword": detected,
-                                "score": 1.0, "ts": time.time(),
-                            })
-                            asr_rec      = new_asr_rec()
-                            listen_start = time.time()
-                            last_partial = ""
-                            self.emit({"event": "listening_start", "trigger": "wake_word", "ts": time.time()})
-                            self._set_state(EngineState.LISTENING)
-                    else:
-                        # No wake word → energy-based VAD to detect speech start
-                        rms = float(np.sqrt(np.mean(audio_np.astype(np.float32) ** 2))) / 32768.0
-                        if rms > energy_threshold:
-                            asr_rec      = new_asr_rec()
-                            listen_start = time.time()
-                            last_partial = ""
-                            self.emit({"event": "listening_start", "trigger": "vad", "ts": time.time()})
-                            self._set_state(EngineState.LISTENING)
-                            asr_rec.AcceptWaveform(audio_bytes)
-
-                # ── LISTENING ─────────────────────────────────────────────────
-                elif self.state == EngineState.LISTENING:
-
-                    # Cancel command
-                    if self._cancel_listen.is_set():
-                        self._cancel_listen.clear()
-                        self.emit({"event": "listening_end", "reason": "cancelled", "ts": time.time()})
-                        asr_rec      = new_asr_rec()
-                        listen_start = None
-                        last_partial = ""
-                        self._set_state(EngineState.IDLE)
-                        continue
-
-                    # Hard timeout
-                    if listen_start is not None:
-                        if (time.time() - listen_start) * 1000 >= max_listen_ms:
-                            self._finalize(asr_rec, "timeout")
-                            asr_rec      = new_asr_rec()
-                            listen_start = None
-                            last_partial = ""
-                            self._set_state(EngineState.IDLE)
+                        try:
+                            audio_bytes = audio_q.get(timeout=0.2)
+                        except queue.Empty:
+                            if (self.state == EngineState.LISTENING
+                                    and listen_start is not None):
+                                elapsed_ms = (time.time() - listen_start) * 1000
+                                if elapsed_ms >= max_listen_ms:
+                                    self._finalize(asr_rec, "timeout")
+                                    asr_rec      = new_asr_rec()
+                                    listen_start = None
+                                    last_partial = ""
+                                    self._set_state(EngineState.IDLE)
                             continue
 
-                    # Feed audio to ASR
-                    if asr_rec.AcceptWaveform(audio_bytes):
-                        # End of utterance
-                        result = json.loads(asr_rec.Result())
-                        text   = result.get("text", "").strip()
-                        if text:
-                            self.emit({"event": "transcript", "text": text, "is_final": True, "ts": time.time()})
-                        self.emit({"event": "listening_end", "reason": "silence", "ts": time.time()})
-                        asr_rec      = new_asr_rec()
-                        listen_start = None
-                        last_partial = ""
-                        self._set_state(EngineState.IDLE)
-                    else:
-                        # Partial / interim result
-                        partial = json.loads(asr_rec.PartialResult()).get("partial", "").strip()
-                        if partial and partial != last_partial:
-                            last_partial = partial
-                            self.emit({"event": "partial", "text": partial, "ts": time.time()})
+                        audio_np = np.frombuffer(audio_bytes, dtype=np.int16)
+
+                        # ── IDLE ──────────────────────────────────────────────
+                        if self.state == EngineState.IDLE:
+
+                            if self._trigger_listen.is_set():
+                                self._trigger_listen.clear()
+                                asr_rec      = new_asr_rec()
+                                listen_start = time.time()
+                                last_partial = ""
+                                self.emit({
+                                    "event": "listening_start",
+                                    "trigger": "manual", "ts": time.time(),
+                                })
+                                self._set_state(EngineState.LISTENING)
+                                continue
+
+                            if ww_enabled and ww_detector is not None:
+                                if resolved_mode == "vosk":
+                                    detected = ww_detector.process(audio_bytes)
+                                else:
+                                    audio_f32 = audio_np.astype(np.float32) / 32768.0
+                                    detected  = ww_detector.process(audio_f32)
+
+                                if detected:
+                                    logger.info(f"Wake word: '{detected}'")
+                                    self.emit({
+                                        "event": "wake_word", "keyword": detected,
+                                        "score": 1.0, "ts": time.time(),
+                                    })
+                                    asr_rec      = new_asr_rec()
+                                    listen_start = time.time()
+                                    last_partial = ""
+                                    self.emit({
+                                        "event": "listening_start",
+                                        "trigger": "wake_word", "ts": time.time(),
+                                    })
+                                    self._set_state(EngineState.LISTENING)
+                            else:
+                                # Energy-based VAD
+                                rms = (float(np.sqrt(np.mean(
+                                    audio_np.astype(np.float32) ** 2
+                                ))) / 32768.0)
+                                if rms > energy_threshold:
+                                    asr_rec      = new_asr_rec()
+                                    listen_start = time.time()
+                                    last_partial = ""
+                                    self.emit({
+                                        "event": "listening_start",
+                                        "trigger": "vad", "ts": time.time(),
+                                    })
+                                    self._set_state(EngineState.LISTENING)
+                                    asr_rec.AcceptWaveform(audio_bytes)
+
+                        # ── LISTENING ─────────────────────────────────────────
+                        elif self.state == EngineState.LISTENING:
+
+                            if self._cancel_listen.is_set():
+                                self._cancel_listen.clear()
+                                self.emit({
+                                    "event": "listening_end",
+                                    "reason": "cancelled", "ts": time.time(),
+                                })
+                                asr_rec      = new_asr_rec()
+                                listen_start = None
+                                last_partial = ""
+                                self._set_state(EngineState.IDLE)
+                                continue
+
+                            if listen_start is not None:
+                                elapsed_ms = (time.time() - listen_start) * 1000
+                                if elapsed_ms >= max_listen_ms:
+                                    self._finalize(asr_rec, "timeout")
+                                    asr_rec      = new_asr_rec()
+                                    listen_start = None
+                                    last_partial = ""
+                                    self._set_state(EngineState.IDLE)
+                                    continue
+
+                            if asr_rec.AcceptWaveform(audio_bytes):
+                                result = json.loads(asr_rec.Result())
+                                text   = result.get("text", "").strip()
+                                if text:
+                                    self.emit({
+                                        "event": "transcript",
+                                        "text": text, "is_final": True,
+                                        "ts": time.time(),
+                                    })
+                                self.emit({
+                                    "event": "listening_end",
+                                    "reason": "silence", "ts": time.time(),
+                                })
+                                asr_rec      = new_asr_rec()
+                                listen_start = None
+                                last_partial = ""
+                                self._set_state(EngineState.IDLE)
+                            else:
+                                partial = json.loads(
+                                    asr_rec.PartialResult()
+                                ).get("partial", "").strip()
+                                if partial and partial != last_partial:
+                                    last_partial = partial
+                                    self.emit({
+                                        "event": "partial",
+                                        "text": partial, "ts": time.time(),
+                                    })
+
+            except Exception as exc:
+                device_error = str(exc)
+
+            # ── Device gone or stop requested ─────────────────────────────────
+            if self._stop_event.is_set():
+                break
+
+            # Device error / disconnected -> NO_DEVICE -> retry
+            msg = device_error or "Microphone disconnected."
+            logger.warning(f"Stream ended: {msg}")
+            self.emit({
+                "event": "error", "code": "no_device",
+                "message": (
+                    f"{msg}  Retrying every {int(_DEVICE_RETRY_SEC)} s..."
+                ),
+                "ts": time.time(),
+            })
+            self._set_state(EngineState.NO_DEVICE)
+            if self._stop_event.wait(_DEVICE_RETRY_SEC):
+                break
 
         self._set_state(EngineState.STOPPED)
 
     def _finalize(self, rec, reason: str):
-        """Emit final ASR result + listening_end."""
         try:
             text = json.loads(rec.FinalResult()).get("text", "").strip()
             if text:
-                self.emit({"event": "transcript", "text": text, "is_final": True, "ts": time.time()})
+                self.emit({
+                    "event": "transcript",
+                    "text": text, "is_final": True, "ts": time.time(),
+                })
         except Exception as exc:
             logger.debug(f"Finalize error: {exc}")
         self.emit({"event": "listening_end", "reason": reason, "ts": time.time()})
