@@ -382,18 +382,21 @@
 
       <div class="config-row">
         <label>灵敏度</label>
-        <input type="range" id="cfgSens" min="0.1" max="1.0" step="0.05" value="0.5"
-               oninput="document.getElementById('cfgSensVal').textContent=this.value">
-        <span class="range-val" id="cfgSensVal">0.5</span>
+        <div style="flex:1;min-width:0;display:flex;align-items:center;gap:6px;">
+          <input type="range" id="cfgSens" min="0.1" max="1.0" step="0.05" value="0.5"
+                 style="flex:1;min-width:0;accent-color:var(--primary)"
+                 oninput="document.getElementById('cfgSensVal').textContent=this.value">
+          <span class="range-val" id="cfgSensVal">0.5</span>
+        </div>
         <button class="btn btn-ghost btn-sm" onclick="applySensitivity()">应用</button>
       </div>
       <div class="config-hint" style="border-color:var(--border)">
         仅 openwakeword 模式有效
       </div>
 
-      <div class="config-row">
-        <label>启用</label>
-        <label style="width:auto;color:var(--text);font-size:.82rem;">
+      <div class="config-row" style="align-items:flex-start">
+        <label style="padding-top:2px">启用</label>
+        <label style="flex:1;min-width:0;width:auto;color:var(--text);font-size:.82rem;line-height:1.5;">
           <input type="checkbox" id="cfgWWEnabled" checked
                  onchange="sendConfigBool('wake_word.enabled', this.checked)">
           &nbsp;唤醒词检测（关闭则有声音即开始识别）

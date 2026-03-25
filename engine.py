@@ -256,6 +256,14 @@ class SpeechEngine:
         # ── Hot-plug device loop ──────────────────────────────────────────────
         while not self._stop_event.is_set():
 
+            # Force PortAudio to re-enumerate devices so a mic plugged in after
+            # startup is visible without restarting the process.
+            try:
+                sd._terminate()
+                sd._initialize()
+            except Exception:
+                pass
+
             # Build a fresh audio queue for each device open attempt
             audio_q: queue.Queue = queue.Queue(maxsize=200)
 
