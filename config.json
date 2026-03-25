@@ -1,26 +1,28 @@
-{
-  "host": "127.0.0.1",
-  "port": 8765,
-  "wake_word": {
-    "enabled": true,
-    "mode": "auto",
-    "keywords": ["你好小智"],
-    "sensitivity": 0.5,
-    "_mode_note": "auto=自动检测 | vosk=中文自定义词(推荐) | openwakeword=英文预训练",
-    "_keywords_note": "vosk模式可填任意中文词组；openwakeword模式: hey_jarvis/alexa/hey_mycroft"
-  },
-  "asr": {
-    "model_path": "models/vosk-model-small-cn-0.22",
-    "max_silence_ms": 1500,
-    "max_listen_ms": 30000,
-    "_model_note": "中文: vosk-model-small-cn-0.22 | 英文: vosk-model-small-en-us-0.15"
-  },
-  "audio": {
-    "device": null,
-    "sample_rate": 16000,
-    "chunk_size": 4000,
-    "energy_threshold": 0.02,
-    "_device_note": "null=系统默认麦克风; 运行 list_devices.py 查看设备ID"
-  },
-  "log_level": "INFO"
+﻿{
+    "host":  "127.0.0.1",
+    "port":  8765,
+    "wake_word":  {
+                      "enabled":  true,
+                      "mode":  "vosk",
+                      "keywords":  [
+                                       "小智"
+                                   ],
+                      "sensitivity":  0.5,
+                      "_mode_note":  "auto=自动检测 | vosk=中文自定义词(推荐) | openwakeword=英文预训练",
+                      "_keywords_note":  "vosk模式可填任意中文词组；openwakeword模式: hey_jarvis/alexa/hey_mycroft"
+                  },
+    "asr":  {
+                "model_path":  "models/vosk-model-small-cn-0.22",
+                "max_silence_ms":  1500,
+                "max_listen_ms":  30000,
+                "_model_note":  "中文: vosk-model-small-cn-0.22 | 英文: vosk-model-small-en-us-0.15"
+            },
+    "audio":  {
+                  "device":  null,
+                  "sample_rate":  16000,
+                  "chunk_size":  4000,
+                  "energy_threshold":  0.02,
+                  "_device_note":  "null=系统默认麦克风; 运行 list_devices.py 查看设备ID"
+              },
+    "log_level":  "INFO"
 }
