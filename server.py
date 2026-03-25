@@ -92,6 +92,19 @@ def load_config(path: str = "config.json") -> dict:
         return dict(_DEFAULTS)
 
 
+def save_config(config: dict, path: str = "config.json"):
+    """Write runtime config back to disk so changes survive process restarts.
+    Keys starting with '_' (notes/comments) are stripped from the output."""
+    def _strip(d: dict) -> dict:
+        return {k: _strip(v) if isinstance(v, dict) else v
+                for k, v in d.items() if not k.startswith("_")}
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(_strip(config), f, ensure_ascii=False, indent=4)
+    except Exception as exc:
+        logging.getLogger("config").warning(f"Failed to save config: {exc}")
+
+
 def setup_logging(level: str = "INFO"):
     numeric = getattr(logging, level.upper(), logging.INFO)
     logging.basicConfig(
@@ -182,6 +195,8 @@ class SpeechServer:
             key   = msg.get("key", "")
             value = msg.get("value")
             ok = self.engine.update_config(key, value)
+            if ok:
+                save_config(self.config)
             await ws.send(json.dumps({
                 "event": "config_updated" if ok else "error",
                 "code":  None if ok else "invalid_key",
