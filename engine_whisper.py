@@ -101,6 +101,47 @@ def _stub_av_if_needed():
     )
 
 
+def _fix_ctranslate2_dlls():
+    """
+    ctranslate2 bundles MKL/OpenMP DLLs next to its C extension.
+    On Windows the OS DLL loader may not find them unless the package
+    directory is explicitly added to the search path via
+    os.add_dll_directory().  If ctranslate2 was already (partially)
+    imported without that path, evict it from sys.modules so the next
+    ``import ctranslate2`` re-runs __init__.py with the correct search
+    path in place.
+    """
+    import sys, os, importlib.util
+
+    if not hasattr(os, "add_dll_directory"):
+        return   # not Windows
+
+    # Find where ctranslate2 is installed
+    spec = importlib.util.find_spec("ctranslate2")
+    if not (spec and spec.submodule_search_locations):
+        return
+    ct2_dir = str(list(spec.submodule_search_locations)[0])
+
+    # Add DLL search directory
+    try:
+        os.add_dll_directory(ct2_dir)
+        logger.debug(f"Added ctranslate2 DLL dir: {ct2_dir}")
+    except OSError as exc:
+        logger.debug(f"add_dll_directory skipped: {exc}")
+
+    # If ctranslate2 loaded without its C extension (StorageView missing),
+    # evict the broken module so the re-import picks up the DLLs we just added.
+    ct2 = sys.modules.get("ctranslate2")
+    if ct2 is not None and not hasattr(ct2, "StorageView"):
+        logger.warning(
+            "ctranslate2 C extension loaded without StorageView; "
+            "forcing reload with updated DLL search path."
+        )
+        stale = [k for k in sys.modules if k == "ctranslate2" or k.startswith("ctranslate2.")]
+        for k in stale:
+            del sys.modules[k]
+
+
 # ── Wake word detectors (identical to engine.py) ──────────────────────────────
 
 class _VoskWakeWordDetector:
@@ -302,6 +343,7 @@ class SpeechEngine:
         )
         try:
             _stub_av_if_needed()
+            _fix_ctranslate2_dlls()
             from faster_whisper import WhisperModel
             asr_model = WhisperModel(
                 whisper_model_name,
