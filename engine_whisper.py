@@ -406,11 +406,13 @@ class SpeechEngine:
         try:
             segments, _ = whisper_model.transcribe(
                 audio_f32,
-                language      = language,   # None = auto-detect (mixed mode)
-                task          = "transcribe",
-                beam_size     = 5,
-                vad_filter    = False,      # we handle VAD ourselves
-                word_timestamps = False,
+                language                   = language,   # None = auto-detect (mixed mode)
+                task                       = "transcribe",
+                beam_size                  = 5,
+                vad_filter                 = False,      # we handle VAD ourselves
+                word_timestamps            = False,
+                initial_prompt             = getattr(self, "_initial_prompt", None),
+                condition_on_previous_text = False,      # prevent context bleeding between sessions
             )
             return "".join(seg.text for seg in segments).strip()
         except Exception as exc:
@@ -453,6 +455,11 @@ class SpeechEngine:
         # VAD-mode interaction tuning
         vad_cooldown_ms:     int          = cfg_whisper.get("vad_cooldown_ms", 500)
         vad_min_speech_ms:   int          = cfg_whisper.get("vad_min_speech_ms", 200)
+        # Minimum recording duration before silence-end can trigger (prevents cutting off first word)
+        min_listen_ms:       int          = cfg_whisper.get("min_listen_ms", 600)
+        # Whisper initial prompt (steers model toward desired language/content style)
+        initial_prompt: Optional[str]     = cfg_whisper.get("initial_prompt")
+        self._initial_prompt              = initial_prompt
 
         # ── Load Whisper model (once per engine start) ────────────────────────
         logger.info(
@@ -523,8 +530,11 @@ class SpeechEngine:
                         logger.info(f"Loading Vosk wake-word model: {ww_model_path}")
                         vosk_model  = vosk.Model(ww_model_path)
                         ww_detector = _VoskWakeWordDetector(vosk_model, sample_rate, keywords)
-                    else:
-                        ww_detector = _OpenWakeWordDetector(keywords, sensitivity)
+                    else:  # openwakeword
+                        # openwakeword_models: list of OWW built-in model names or .onnx paths
+                        # (e.g. ["hey_jarvis", "alexa"]).  Falls back to keywords if not set.
+                        oww_models = cfg_ww.get("openwakeword_models") or keywords
+                        ww_detector = _OpenWakeWordDetector(oww_models, sensitivity)
                 except Exception as exc:
                     logger.warning(
                         f"Wake word init failed ({exc}); "
@@ -762,7 +772,9 @@ class SpeechEngine:
                             if rms < energy_threshold:
                                 if silence_start is None:
                                     silence_start = time.time()
-                                elif (time.time() - silence_start) * 1000 >= max_silence_ms:
+                                elif ((time.time() - silence_start) * 1000 >= max_silence_ms
+                                      and listen_start is not None
+                                      and (time.time() - listen_start) * 1000 >= min_listen_ms):
                                     self._finalize(asr_model, listen_buf, language, "silence")
                                     listen_buf    = []
                                     listen_start  = None

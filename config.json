@@ -8,8 +8,10 @@
                                        "小智"
                                    ],
                       "sensitivity":  0.5,
-                      "_mode_note":  "auto=自动检测 | vosk=中文自定义词(推荐) | openwakeword=英文预训练",
-                      "_keywords_note":  "vosk模式可填任意中文词组；openwakeword模式: hey_jarvis/alexa/hey_mycroft"
+                      "openwakeword_models":  ["hey_jarvis"],
+                      "_mode_note":  "auto=自动检测 | vosk=中文自定义词(推荐) | openwakeword=英文预训练 | whisper=Whisper识别(无需额外依赖)",
+                      "_keywords_note":  "vosk/whisper模式可填任意中文词组；openwakeword模式需填有效模型名",
+                      "_openwakeword_models_note":  "openwakeword模式专用，内置模型: hey_jarvis/alexa/hey_mycroft/timer/weather；也可填.onnx文件路径"
                   },
     "asr":  {
                 "model_path":  "models/vosk-model-small-cn-0.22",
@@ -19,20 +21,24 @@
             },
     "whisper":  {
                     "model":  "base",
-                    "language":  null,
+                    "language":  "zh",
                     "device":  "cpu",
                     "compute_type":  "int8",
                     "partial_interval_ms":  2000,
-                    "max_silence_ms":  1500,
+                    "max_silence_ms":  2500,
                     "max_listen_ms":  30000,
                     "vad_cooldown_ms":  500,
                     "vad_min_speech_ms":  200,
+                    "min_listen_ms":  600,
+                    "initial_prompt":  "以下是普通话，包含中文、数字和英文字母。",
                     "_model_note":  "tiny(最快)|base(推荐)|small|medium|large-v3(最准)",
-                    "_language_note":  "null=自动检测中英混杂 | zh=中文 | en=英文",
+                    "_language_note":  "null=自动检测中英混杂 | zh=中文(推荐，数字/字母更准) | en=英文",
                     "_device_note":  "cpu | cuda (需安装 nvidia-cudnn-cu12)",
                     "_compute_note":  "cpu: int8(推荐) | cuda: float16",
                     "_vad_cooldown_note":  "识别结束后多久才允许下一次VAD触发(ms)",
-                    "_vad_min_speech_note":  "VAD模式下需要连续声音多久才开始识别(ms)"
+                    "_vad_min_speech_note":  "VAD模式下需要连续声音多久才开始识别(ms)",
+                    "_min_listen_note":  "开始录音后至少录多久才允许静音结束(ms)，防止第一个字还没说完就结束",
+                    "_initial_prompt_note":  "引导Whisper识别风格；设为null可关闭"
                 },
     "audio":  {
                   "device":  null,

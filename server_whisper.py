@@ -79,10 +79,12 @@ _DEFAULTS: dict = {
         "device":              "cpu",
         "compute_type":        "int8",
         "partial_interval_ms": 2000,
-        "max_silence_ms":      1500,
+        "max_silence_ms":      2500,   # ms of silence to end session (2500 = natural pause)
         "max_listen_ms":       30000,
         "vad_cooldown_ms":     500,
         "vad_min_speech_ms":   200,
+        "min_listen_ms":       600,    # min recording before silence-end can fire
+        "initial_prompt":      None,   # e.g. "以下是普通话，包含中文、数字和英文字母。"
     },
     "audio": {
         "device":           None,
