@@ -103,22 +103,20 @@ def _stub_av_if_needed():
 
 def _fix_ctranslate2_dlls():
     """
-    ctranslate2 bundles MKL/OpenMP DLLs next to its C extension.
-    On some Windows environments the DLL loader cannot find them,
-    causing the C extension to load silently incomplete (StorageView
-    and other C-side symbols are missing).
+    ctranslate2's C extension sometimes fails to load on Windows
+    (missing MKL/OpenMP DLLs, ABI mismatch, etc.), leaving the Python
+    module importable but without its C-side classes.
 
-    Strategy (applied in order):
+    Strategy:
     1. Add ctranslate2's own directory to the OS DLL search path.
-    2. Evict any already-imported broken copy from sys.modules so
-       the next import re-runs __init__.py with the new path.
-    3. Re-import ctranslate2.
-    4. If StorageView is still absent after the reload, inject a
-       minimal stub class.  faster-whisper uses StorageView only as
-       an Optional type-annotation default (= None); the stub is
-       never instantiated during normal numpy-array transcription.
+    2. Evict any already-cached broken copy from sys.modules.
+    3. Re-import ctranslate2 with the corrected search path.
+    4. Scan faster_whisper/transcribe.py for every ctranslate2.Xxx and
+       ctranslate2.models.Xxx reference; stub any that are still missing.
+       These symbols appear only as type annotations (never instantiated
+       during numpy-array transcription), so stubs are safe at runtime.
     """
-    import sys, os, importlib.util
+    import sys, os, re, types, importlib.util
 
     # ── Step 1: add DLL directory (Windows only) ──────────────────
     if hasattr(os, "add_dll_directory"):
@@ -127,30 +125,55 @@ def _fix_ctranslate2_dlls():
             ct2_dir = str(list(spec.submodule_search_locations)[0])
             try:
                 os.add_dll_directory(ct2_dir)
-                logger.debug(f"Added ctranslate2 DLL dir: {ct2_dir}")
-            except OSError as exc:
-                logger.debug(f"add_dll_directory skipped: {exc}")
+            except OSError:
+                pass
 
-    # ── Step 2: evict broken module if already cached ─────────────
+    # ── Step 2: evict broken cached module ────────────────────────
     ct2 = sys.modules.get("ctranslate2")
     if ct2 is not None and not hasattr(ct2, "StorageView"):
-        stale = [k for k in sys.modules
-                 if k == "ctranslate2" or k.startswith("ctranslate2.")]
-        for k in stale:
+        for k in [k for k in sys.modules
+                  if k == "ctranslate2" or k.startswith("ctranslate2.")]:
             del sys.modules[k]
 
     # ── Step 3: fresh import ──────────────────────────────────────
     import ctranslate2
 
-    # ── Step 4: stub missing symbols used only as type annotations ─
-    if not hasattr(ctranslate2, "StorageView"):
-        ctranslate2.StorageView = type("StorageView", (), {})
+    # Ensure ctranslate2.models sub-module exists
+    if not hasattr(ctranslate2, "models"):
+        ctranslate2.models = types.ModuleType("ctranslate2.models")
+        sys.modules["ctranslate2.models"] = ctranslate2.models
+
+    # ── Step 4: scan transcribe.py and stub every missing symbol ──
+    fw_spec = importlib.util.find_spec("faster_whisper")
+    source = ""
+    if fw_spec and fw_spec.submodule_search_locations:
+        tp = os.path.join(str(list(fw_spec.submodule_search_locations)[0]),
+                          "transcribe.py")
+        try:
+            with open(tp, encoding="utf-8") as fh:
+                source = fh.read()
+        except OSError:
+            pass
+
+    stubbed: list = []
+    # ctranslate2.models.Xxx
+    for name in set(re.findall(r"ctranslate2\.models\.(\w+)", source)):
+        if not hasattr(ctranslate2.models, name):
+            setattr(ctranslate2.models, name, type(name, (), {}))
+            stubbed.append(f"ctranslate2.models.{name}")
+    # ctranslate2.Xxx  (exclude the "models" sub-module itself)
+    for name in set(re.findall(r"ctranslate2\.(?!models\b)(\w+)", source)):
+        if not hasattr(ctranslate2, name):
+            setattr(ctranslate2, name, type(name, (), {}))
+            stubbed.append(f"ctranslate2.{name}")
+
+    if stubbed:
         logger.warning(
-            "ctranslate2.StorageView still missing after reload; "
-            "injected a stub so faster-whisper can be imported.  "
-            "Transcription will work if ctranslate2 inference classes "
-            "are functional.  To fully fix: "
-            "pip install --force-reinstall ctranslate2>=4.0.0"
+            "ctranslate2 C extension did not expose %d symbol(s); "
+            "injected stubs for type annotations: %s.  "
+            "Transcription works if ctranslate2 inference classes loaded correctly.  "
+            "To fully fix: pip install --force-reinstall ctranslate2>=4.0.0",
+            len(stubbed), ", ".join(sorted(stubbed)),
         )
 
 
