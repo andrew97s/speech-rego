@@ -155,16 +155,41 @@ def _fix_ctranslate2_dlls():
         except OSError:
             pass
 
+    _CT2_BROKEN_MSG = (
+        "ctranslate2 C extension failed to load on this system.  "
+        "Fix options:\n"
+        "  1. pip install --force-reinstall ctranslate2>=4.0.0\n"
+        "  2. Install VC++ Redistributable 2022 (x64) and retry:\n"
+        "     https://aka.ms/vs/17/release/vc_redist.x64.exe"
+    )
+
+    def _make_ct2_stub(full_name: str):
+        """Return a stub class that raises a helpful error when instantiated."""
+        msg = _CT2_BROKEN_MSG
+        fname = full_name
+
+        class _Stub:
+            def __init__(self, *a, **kw):
+                raise RuntimeError(
+                    f"{fname} could not be loaded — {msg}"
+                )
+            def __class_getitem__(cls, item):   # satisfy Optional[Stub]
+                return cls
+
+        _Stub.__name__ = full_name.split(".")[-1]
+        _Stub.__qualname__ = full_name
+        return _Stub
+
     stubbed: list = []
     # ctranslate2.models.Xxx
     for name in set(re.findall(r"ctranslate2\.models\.(\w+)", source)):
         if not hasattr(ctranslate2.models, name):
-            setattr(ctranslate2.models, name, type(name, (), {}))
+            setattr(ctranslate2.models, name, _make_ct2_stub(f"ctranslate2.models.{name}"))
             stubbed.append(f"ctranslate2.models.{name}")
     # ctranslate2.Xxx  (exclude the "models" sub-module itself)
     for name in set(re.findall(r"ctranslate2\.(?!models\b)(\w+)", source)):
         if not hasattr(ctranslate2, name):
-            setattr(ctranslate2, name, type(name, (), {}))
+            setattr(ctranslate2, name, _make_ct2_stub(f"ctranslate2.{name}"))
             stubbed.append(f"ctranslate2.{name}")
 
     if stubbed:
