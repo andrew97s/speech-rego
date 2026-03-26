@@ -104,42 +104,54 @@ def _stub_av_if_needed():
 def _fix_ctranslate2_dlls():
     """
     ctranslate2 bundles MKL/OpenMP DLLs next to its C extension.
-    On Windows the OS DLL loader may not find them unless the package
-    directory is explicitly added to the search path via
-    os.add_dll_directory().  If ctranslate2 was already (partially)
-    imported without that path, evict it from sys.modules so the next
-    ``import ctranslate2`` re-runs __init__.py with the correct search
-    path in place.
+    On some Windows environments the DLL loader cannot find them,
+    causing the C extension to load silently incomplete (StorageView
+    and other C-side symbols are missing).
+
+    Strategy (applied in order):
+    1. Add ctranslate2's own directory to the OS DLL search path.
+    2. Evict any already-imported broken copy from sys.modules so
+       the next import re-runs __init__.py with the new path.
+    3. Re-import ctranslate2.
+    4. If StorageView is still absent after the reload, inject a
+       minimal stub class.  faster-whisper uses StorageView only as
+       an Optional type-annotation default (= None); the stub is
+       never instantiated during normal numpy-array transcription.
     """
     import sys, os, importlib.util
 
-    if not hasattr(os, "add_dll_directory"):
-        return   # not Windows
+    # ── Step 1: add DLL directory (Windows only) ──────────────────
+    if hasattr(os, "add_dll_directory"):
+        spec = importlib.util.find_spec("ctranslate2")
+        if spec and spec.submodule_search_locations:
+            ct2_dir = str(list(spec.submodule_search_locations)[0])
+            try:
+                os.add_dll_directory(ct2_dir)
+                logger.debug(f"Added ctranslate2 DLL dir: {ct2_dir}")
+            except OSError as exc:
+                logger.debug(f"add_dll_directory skipped: {exc}")
 
-    # Find where ctranslate2 is installed
-    spec = importlib.util.find_spec("ctranslate2")
-    if not (spec and spec.submodule_search_locations):
-        return
-    ct2_dir = str(list(spec.submodule_search_locations)[0])
-
-    # Add DLL search directory
-    try:
-        os.add_dll_directory(ct2_dir)
-        logger.debug(f"Added ctranslate2 DLL dir: {ct2_dir}")
-    except OSError as exc:
-        logger.debug(f"add_dll_directory skipped: {exc}")
-
-    # If ctranslate2 loaded without its C extension (StorageView missing),
-    # evict the broken module so the re-import picks up the DLLs we just added.
+    # ── Step 2: evict broken module if already cached ─────────────
     ct2 = sys.modules.get("ctranslate2")
     if ct2 is not None and not hasattr(ct2, "StorageView"):
-        logger.warning(
-            "ctranslate2 C extension loaded without StorageView; "
-            "forcing reload with updated DLL search path."
-        )
-        stale = [k for k in sys.modules if k == "ctranslate2" or k.startswith("ctranslate2.")]
+        stale = [k for k in sys.modules
+                 if k == "ctranslate2" or k.startswith("ctranslate2.")]
         for k in stale:
             del sys.modules[k]
+
+    # ── Step 3: fresh import ──────────────────────────────────────
+    import ctranslate2
+
+    # ── Step 4: stub missing symbols used only as type annotations ─
+    if not hasattr(ctranslate2, "StorageView"):
+        ctranslate2.StorageView = type("StorageView", (), {})
+        logger.warning(
+            "ctranslate2.StorageView still missing after reload; "
+            "injected a stub so faster-whisper can be imported.  "
+            "Transcription will work if ctranslate2 inference classes "
+            "are functional.  To fully fix: "
+            "pip install --force-reinstall ctranslate2>=4.0.0"
+        )
 
 
 # ── Wake word detectors (identical to engine.py) ──────────────────────────────
