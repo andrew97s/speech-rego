@@ -59,6 +59,48 @@ def _buffer_to_float32(buf: List[bytes]) -> np.ndarray:
     return raw.astype(np.float32) / 32768.0
 
 
+def _stub_av_if_needed():
+    """
+    faster-whisper imports ``av`` (PyAV) at module level for audio-file
+    decoding.  We always pass numpy arrays so ``av`` is never actually
+    called at runtime.  On Windows, if av's bundled FFmpeg DLLs are
+    missing, inject a minimal in-memory stub so the import succeeds.
+    """
+    try:
+        import av  # noqa: F401
+        return     # av is healthy, nothing to do
+    except (ImportError, OSError):
+        pass
+
+    import sys
+    import types
+
+    def _mod(name: str) -> types.ModuleType:
+        m = types.ModuleType(name)
+        sys.modules[name] = m
+        return m
+
+    av_mod        = _mod("av")
+    core_mod      = _mod("av._core")
+    audio_mod     = _mod("av.audio")
+    resampler_mod = _mod("av.audio.resampler")
+
+    # av/__init__.py does: from av._core import time_base, library_versions, ...
+    core_mod.time_base           = 0
+    core_mod.library_versions    = lambda: {}
+    core_mod.ffmpeg_version_info = (0, 0, 0)
+
+    av_mod._core        = core_mod
+    av_mod.audio        = audio_mod
+    audio_mod.resampler = resampler_mod
+
+    logger.warning(
+        "av (PyAV) DLL failed to load; injected a stub module so "
+        "faster-whisper can start.  numpy-array input works normally; "
+        "audio file paths would not work."
+    )
+
+
 # ── Wake word detectors (identical to engine.py) ──────────────────────────────
 
 class _VoskWakeWordDetector:
@@ -259,6 +301,7 @@ class SpeechEngine:
             "  First run will download the model from HuggingFace Hub (~75 MB for 'base')."
         )
         try:
+            _stub_av_if_needed()
             from faster_whisper import WhisperModel
             asr_model = WhisperModel(
                 whisper_model_name,
