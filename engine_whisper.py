@@ -410,16 +410,29 @@ class SpeechEngine:
                 device       = whisper_device,
                 compute_type = compute_type,
             )
+            # Warm-up: run a short silent inference to catch CUDA dependency
+            # errors (e.g. cublas64_12.dll missing) before the mic opens.
+            _dummy = np.zeros(int(_WHISPER_SAMPLE_RATE * 0.1), dtype=np.float32)
+            list(asr_model.transcribe(_dummy, beam_size=1)[0])
         except Exception as exc:
-            self.emit({
-                "event": "error", "code": "model_not_found",
-                "message": (
-                    f"Failed to load Whisper model '{whisper_model_name}': {exc}.  "
-                    "Install faster-whisper: pip install faster-whisper"
-                ),
-                "ts": time.time(),
-            })
-            raise
+            _exc_s = str(exc).lower()
+            if any(k in _exc_s for k in ("cublas", "cudnn", "libcuda", "cuda")):
+                logger.warning(
+                    f"compute_type={compute_type!r} triggered a CUDA dependency "
+                    f"({exc}); falling back to float32 on cpu."
+                )
+                compute_type  = "float32"
+                whisper_device = "cpu"
+                asr_model = WhisperModel(
+                    whisper_model_name, device="cpu", compute_type="float32"
+                )
+            else:
+                self.emit({
+                    "event": "error", "code": "model_not_found",
+                    "message": f"Failed to load Whisper model '{whisper_model_name}': {exc}",
+                    "ts": time.time(),
+                })
+                raise
 
         lang_desc = language if language else "auto/mixed (Chinese + English)"
         logger.info(f"Whisper model ready.  Language: {lang_desc}")
