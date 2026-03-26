@@ -65,7 +65,7 @@ _DEFAULTS: dict = {
     "port": 8766,                  # different port from Vosk server (8765)
     "wake_word": {
         "enabled":     True,
-        "mode":        "vosk",
+        "mode":        "whisper",   # whisper mode needs no extra dependencies
         "keywords":    ["小智"],
         "sensitivity": 0.5,
     },
@@ -81,6 +81,8 @@ _DEFAULTS: dict = {
         "partial_interval_ms": 2000,
         "max_silence_ms":      1500,
         "max_listen_ms":       30000,
+        "vad_cooldown_ms":     500,
+        "vad_min_speech_ms":   200,
     },
     "audio": {
         "device":           None,

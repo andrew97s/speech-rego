@@ -251,6 +251,64 @@ class _OpenWakeWordDetector:
         return None
 
 
+class _WhisperWakeWordDetector:
+    """
+    Wake word detection using the already-loaded Whisper model.
+    Maintains a 1.5 s sliding audio window; when speech energy is
+    detected, runs a quick Whisper inference (beam_size=1) and checks
+    if any configured keyword appears in the output.
+    No additional dependencies required — works with or without vosk.
+    """
+    _WINDOW_SEC   = 1.5   # sliding inference window length
+    _COOLDOWN_SEC = 0.4   # min gap between consecutive inferences
+
+    def __init__(self, model, keywords: List[str], language: Optional[str],
+                 sample_rate: int = _WHISPER_SAMPLE_RATE):
+        self._model     = model
+        self.keywords   = [kw.strip() for kw in keywords]
+        # Normalise for matching: remove spaces, lowercase
+        self._kw_norm   = [kw.replace(" ", "").lower() for kw in keywords]
+        self._language  = language
+        self._win_bytes = int(self._WINDOW_SEC * sample_rate) * 2  # int16 bytes
+        self._buf       = bytearray()
+        self._last_infer = 0.0
+        logger.info(f"[WakeWord] Whisper mode -- keywords: {self.keywords}")
+
+    def process(self, audio_bytes: bytes, rms: float,
+                energy_threshold: float) -> Optional[str]:
+        self._buf.extend(audio_bytes)
+        if len(self._buf) > self._win_bytes:
+            self._buf = self._buf[-self._win_bytes:]
+
+        # Skip if quiet or inference ran too recently
+        if (rms < energy_threshold
+                or time.time() - self._last_infer < self._COOLDOWN_SEC
+                or len(self._buf) < self._win_bytes // 3):
+            return None
+
+        self._last_infer = time.time()
+        audio_f32 = (np.frombuffer(bytes(self._buf), dtype=np.int16)
+                     .astype(np.float32) / 32768.0)
+        try:
+            segs, _ = self._model.transcribe(
+                audio_f32,
+                language        = self._language,
+                task            = "transcribe",
+                beam_size       = 1,   # fast enough for wake-word
+                vad_filter      = False,
+                word_timestamps = False,
+            )
+            text = "".join(s.text for s in segs).replace(" ", "").lower()
+        except Exception:
+            return None
+
+        for kw, kw_n in zip(self.keywords, self._kw_norm):
+            if kw_n in text:
+                self._buf.clear()
+                return kw
+        return None
+
+
 # ── Engine state ───────────────────────────────────────────────────────────────
 
 class EngineState(Enum):
@@ -388,10 +446,13 @@ class SpeechEngine:
         whisper_model_name: str            = cfg_whisper.get("model", "base")
         whisper_device:     str            = cfg_whisper.get("device", "cpu")
         compute_type:       str            = cfg_whisper.get("compute_type", "int8")
-        language:           Optional[str]  = cfg_whisper.get("language")   # None = auto/mixed
-        max_silence_ms:     int            = cfg_whisper.get("max_silence_ms", 1500)
-        max_listen_ms:      int            = cfg_whisper.get("max_listen_ms", 30000)
-        partial_interval_ms: int           = cfg_whisper.get("partial_interval_ms", 2000)
+        language:            Optional[str] = cfg_whisper.get("language")   # None = auto/mixed
+        max_silence_ms:      int          = cfg_whisper.get("max_silence_ms", 1500)
+        max_listen_ms:       int          = cfg_whisper.get("max_listen_ms", 30000)
+        partial_interval_ms: int          = cfg_whisper.get("partial_interval_ms", 2000)
+        # VAD-mode interaction tuning
+        vad_cooldown_ms:     int          = cfg_whisper.get("vad_cooldown_ms", 500)
+        vad_min_speech_ms:   int          = cfg_whisper.get("vad_min_speech_ms", 200)
 
         # ── Load Whisper model (once per engine start) ────────────────────────
         logger.info(
@@ -446,39 +507,41 @@ class SpeechEngine:
 
         ww_detector = None
         if ww_enabled and keywords:
-            try:
-                if resolved_mode == "vosk":
-                    import vosk
-                    vosk.SetLogLevel(-1)
-                    ww_model_path = self.config.get("asr", {}).get(
-                        "model_path", "models/vosk-model-small-cn-0.22"
-                    )
-                    logger.info(f"Loading Vosk wake-word model: {ww_model_path}")
-                    vosk_model  = vosk.Model(ww_model_path)
-                    ww_detector = _VoskWakeWordDetector(vosk_model, sample_rate, keywords)
-                else:
-                    try:
-                        ww_detector = _OpenWakeWordDetector(keywords, sensitivity)
-                    except Exception as oww_exc:
-                        logger.warning(
-                            f"OpenWakeWord failed ({oww_exc}), falling back to energy VAD."
+            if resolved_mode == "whisper":
+                # Explicit whisper mode — no external deps needed
+                ww_detector = _WhisperWakeWordDetector(
+                    asr_model, keywords, language, sample_rate
+                )
+            else:
+                try:
+                    if resolved_mode == "vosk":
+                        import vosk
+                        vosk.SetLogLevel(-1)
+                        ww_model_path = self.config.get("asr", {}).get(
+                            "model_path", "models/vosk-model-small-cn-0.22"
                         )
-                        self.emit({
-                            "event": "error", "code": "wake_word_fallback",
-                            "message": (
-                                f"openwakeword unavailable ({oww_exc}), "
-                                "switched to energy-based VAD."
-                            ),
-                            "ts": time.time(),
-                        })
-                        ww_enabled = False
-            except Exception as exc:
-                logger.warning(f"Wake word init failed: {exc}. Using energy-based VAD.")
-                self.emit({
-                    "event": "error", "code": "wake_word_unavailable",
-                    "message": str(exc), "ts": time.time(),
-                })
-                ww_enabled = False
+                        logger.info(f"Loading Vosk wake-word model: {ww_model_path}")
+                        vosk_model  = vosk.Model(ww_model_path)
+                        ww_detector = _VoskWakeWordDetector(vosk_model, sample_rate, keywords)
+                    else:
+                        ww_detector = _OpenWakeWordDetector(keywords, sensitivity)
+                except Exception as exc:
+                    logger.warning(
+                        f"Wake word init failed ({exc}); "
+                        "falling back to Whisper wake-word mode."
+                    )
+                    self.emit({
+                        "event": "error", "code": "wake_word_fallback",
+                        "message": (
+                            f"Primary wake-word backend unavailable ({exc}); "
+                            "switched to Whisper wake-word."
+                        ),
+                        "ts": time.time(),
+                    })
+                    resolved_mode = "whisper"
+                    ww_detector   = _WhisperWakeWordDetector(
+                        asr_model, keywords, language, sample_rate
+                    )
 
         logger.info(
             "Wake word: " + ("enabled" if ww_enabled else "disabled")
@@ -554,9 +617,12 @@ class SpeechEngine:
                     logger.info("Microphone open.  Whisper engine running.")
                     self._set_state(EngineState.IDLE)
 
-                    listen_buf:   List[bytes]      = []
-                    listen_start: Optional[float]  = None
+                    listen_buf:    List[bytes]     = []
+                    listen_start:  Optional[float] = None
                     silence_start: Optional[float] = None
+                    # VAD-mode interaction state
+                    _vad_speech_since:   Optional[float] = None  # when sustained speech started
+                    _vad_cooldown_until: float            = 0.0  # no new VAD trigger before this
 
                     while not self._stop_event.is_set():
 
@@ -577,6 +643,8 @@ class SpeechEngine:
                                     silence_start = None
                                     _last_partial_text[0] = ""
                                     _last_partial_ts[0]   = 0.0
+                                    _vad_speech_since   = None
+                                    _vad_cooldown_until = time.time() + vad_cooldown_ms / 1000
                                     self._set_state(EngineState.IDLE)
                             continue
 
@@ -595,6 +663,8 @@ class SpeechEngine:
                                 silence_start = None
                                 _last_partial_text[0] = ""
                                 _last_partial_ts[0]   = 0.0
+                                _vad_speech_since   = None
+                                _vad_cooldown_until = 0.0
                                 self.emit({
                                     "event": "listening_start",
                                     "trigger": "manual", "ts": time.time(),
@@ -605,6 +675,10 @@ class SpeechEngine:
                             if ww_enabled and ww_detector is not None:
                                 if resolved_mode == "vosk":
                                     detected = ww_detector.process(audio_bytes)
+                                elif resolved_mode == "whisper":
+                                    detected = ww_detector.process(
+                                        audio_bytes, rms, energy_threshold
+                                    )
                                 else:
                                     detected = ww_detector.process(
                                         audio_np.astype(np.float32) / 32768.0
@@ -627,18 +701,26 @@ class SpeechEngine:
                                     })
                                     self._set_state(EngineState.LISTENING)
                             else:
-                                # Energy-based VAD
-                                if rms > energy_threshold:
-                                    listen_buf    = [audio_bytes]
-                                    listen_start  = time.time()
-                                    silence_start = None
-                                    _last_partial_text[0] = ""
-                                    _last_partial_ts[0]   = 0.0
-                                    self.emit({
-                                        "event": "listening_start",
-                                        "trigger": "vad", "ts": time.time(),
-                                    })
-                                    self._set_state(EngineState.LISTENING)
+                                # Energy-based VAD with cooldown + min-speech gate
+                                now = time.time()
+                                if rms > energy_threshold and now >= _vad_cooldown_until:
+                                    if _vad_speech_since is None:
+                                        _vad_speech_since = now
+                                    elif (now - _vad_speech_since) * 1000 >= vad_min_speech_ms:
+                                        _vad_speech_since   = None
+                                        _vad_cooldown_until = 0.0
+                                        listen_buf    = [audio_bytes]
+                                        listen_start  = time.time()
+                                        silence_start = None
+                                        _last_partial_text[0] = ""
+                                        _last_partial_ts[0]   = 0.0
+                                        self.emit({
+                                            "event": "listening_start",
+                                            "trigger": "vad", "ts": time.time(),
+                                        })
+                                        self._set_state(EngineState.LISTENING)
+                                else:
+                                    _vad_speech_since = None  # reset on quiet/cooldown
 
                         # ── LISTENING ─────────────────────────────────────────
                         elif self.state == EngineState.LISTENING:
@@ -654,6 +736,8 @@ class SpeechEngine:
                                 silence_start = None
                                 _last_partial_text[0] = ""
                                 _last_partial_ts[0]   = 0.0
+                                _vad_speech_since   = None
+                                _vad_cooldown_until = time.time() + vad_cooldown_ms / 1000
                                 self._set_state(EngineState.IDLE)
                                 continue
 
@@ -666,6 +750,8 @@ class SpeechEngine:
                                 silence_start = None
                                 _last_partial_text[0] = ""
                                 _last_partial_ts[0]   = 0.0
+                                _vad_speech_since   = None
+                                _vad_cooldown_until = time.time() + vad_cooldown_ms / 1000
                                 self._set_state(EngineState.IDLE)
                                 continue
 
@@ -683,6 +769,8 @@ class SpeechEngine:
                                     silence_start = None
                                     _last_partial_text[0] = ""
                                     _last_partial_ts[0]   = 0.0
+                                    _vad_speech_since   = None
+                                    _vad_cooldown_until = time.time() + vad_cooldown_ms / 1000
                                     self._set_state(EngineState.IDLE)
                                     continue
                             else:
