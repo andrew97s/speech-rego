@@ -5,8 +5,4 @@ vosk>=0.3.45
 openwakeword>=0.6.0
 
 # Whisper STT backend (for server_whisper.py / engine_whisper.py)
-# faster-whisper is preferred (faster, lower memory).
-# openai-whisper is the automatic fallback when faster-whisper DLL
-# dependencies (av/FFmpeg) are missing on Windows.
 faster-whisper>=0.10.0
-openai-whisper>=20231117

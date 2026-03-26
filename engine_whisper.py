@@ -59,82 +59,54 @@ def _buffer_to_float32(buf: List[bytes]) -> np.ndarray:
     return raw.astype(np.float32) / 32768.0
 
 
-def _is_dll_error(exc: Exception) -> bool:
-    """Return True for Windows DLL / shared-library load failures."""
-    msg = str(exc).lower()
-    return any(kw in msg for kw in ("dll load failed", "_core", "importerror",
-                                    "找不到指定的模块", "cannot open shared object"))
-
-
-# ── Whisper backend abstraction ────────────────────────────────────────────────
-# Supports faster-whisper (preferred) and openai-whisper (fallback).
-
-class _FasterWhisperBackend:
-    name = "faster-whisper"
-
-    def __init__(self, model_name: str, device: str, compute_type: str):
-        from faster_whisper import WhisperModel   # type: ignore
-        self._model = WhisperModel(model_name, device=device, compute_type=compute_type)
-
-    def transcribe(self, audio_f32: np.ndarray, language: Optional[str]) -> str:
-        segments, _ = self._model.transcribe(
-            audio_f32,
-            language        = language,
-            task            = "transcribe",
-            beam_size       = 5,
-            vad_filter      = False,
-            word_timestamps = False,
-        )
-        return "".join(seg.text for seg in segments).strip()
-
-
-class _OpenAIWhisperBackend:
-    name = "openai-whisper"
-
-    def __init__(self, model_name: str):
-        import whisper as _whisper              # type: ignore
-        self._model = _whisper.load_model(model_name)
-
-    def transcribe(self, audio_f32: np.ndarray, language: Optional[str]) -> str:
-        result = self._model.transcribe(
-            audio_f32,
-            language = language,
-            task     = "transcribe",
-            fp16     = False,
-        )
-        return result.get("text", "").strip()
-
-
-def _load_whisper_backend(model_name: str, device: str, compute_type: str):
-    """Try faster-whisper; on DLL / import failure fall back to openai-whisper."""
+def _stub_av_if_needed():
+    """
+    faster-whisper imports ``av`` (PyAV) at module level for audio-file
+    decoding.  We always pass numpy arrays, so ``av`` is never actually
+    called.  When its FFmpeg DLLs are missing on Windows, inject a minimal
+    stub so the faster-whisper import can succeed.
+    """
     try:
-        backend = _FasterWhisperBackend(model_name, device, compute_type)
-        logger.info(f"Whisper backend: faster-whisper (model={model_name})")
-        return backend
-    except Exception as exc:
-        if not (_is_dll_error(exc) or isinstance(exc, (ImportError, ModuleNotFoundError))):
-            raise   # unexpected error – re-raise
-        logger.warning(
-            f"faster-whisper unavailable ({exc}). "
-            "Falling back to openai-whisper.\n"
-            "  Fix: install VC++ Redistributable or run:\n"
-            "       pip install openai-whisper"
-        )
+        import av  # noqa: F401
+        return     # av loads fine, nothing to do
+    except (ImportError, OSError):
+        pass
 
-    try:
-        backend = _OpenAIWhisperBackend(model_name)
-        logger.info(f"Whisper backend: openai-whisper (model={model_name})")
-        return backend
-    except (ImportError, ModuleNotFoundError) as exc2:
-        raise RuntimeError(
-            "Neither faster-whisper nor openai-whisper could be loaded.\n"
-            "  Option A (recommended): fix VC++ Redistributable, then reinstall faster-whisper\n"
-            "       https://aka.ms/vs/17/release/vc_redist.x64.exe\n"
-            "       pip install --force-reinstall faster-whisper\n"
-            "  Option B: install openai-whisper\n"
-            "       pip install openai-whisper\n"
-            f"  Details: {exc2}"
-        ) from exc2
+    import sys
+    import types
+
+    def _mod(name: str) -> types.ModuleType:
+        m = types.ModuleType(name)
+        sys.modules[name] = m
+        return m
+
+    av_mod          = _mod("av")
+    core_mod        = _mod("av._core")
+    audio_mod       = _mod("av.audio")
+    resampler_mod   = _mod("av.audio.resampler")
+
+    # Attributes imported by av/__init__.py from av._core
+    core_mod.time_base          = 0
+    core_mod.library_versions   = lambda: {}
+    core_mod.ffmpeg_version_info = (0, 0, 0)
+
+    av_mod._core        = core_mod
+    av_mod.audio        = audio_mod
+    audio_mod.resampler = resampler_mod
+
+    logger.warning(
+        "av (PyAV) DLL failed to load on this system.  "
+        "A stub module was injected so faster-whisper can start.  "
+        "Passing numpy arrays (our normal path) works fine; "
+        "audio file paths would not work."
+    )
+
+
+def _load_whisper_model(model_name: str, device: str, compute_type: str):
+    """Load a faster-whisper WhisperModel, stubbing av if its DLLs are missing."""
+    _stub_av_if_needed()
+    from faster_whisper import WhisperModel   # type: ignore
+    return WhisperModel(model_name, device=device, compute_type=compute_type)
 
 
 # ── Wake word detectors (identical to engine.py) ──────────────────────────────
@@ -272,7 +244,7 @@ class SpeechEngine:
             })
             self.state = EngineState.STOPPED
 
-    def _do_transcribe(self, backend, buf: List[bytes], language: Optional[str]) -> str:
+    def _do_transcribe(self, model, buf: List[bytes], language: Optional[str]) -> str:
         """Run Whisper on buffered audio; returns stripped transcript string."""
         if not buf:
             return ""
@@ -281,14 +253,22 @@ class SpeechEngine:
         if len(audio_f32) < _WHISPER_SAMPLE_RATE * 0.3:
             return ""
         try:
-            return backend.transcribe(audio_f32, language)
+            segments, _ = model.transcribe(
+                audio_f32,
+                language        = language,
+                task            = "transcribe",
+                beam_size       = 5,
+                vad_filter      = False,
+                word_timestamps = False,
+            )
+            return "".join(seg.text for seg in segments).strip()
         except Exception as exc:
             logger.warning(f"Whisper inference error: {exc}")
             return ""
 
-    def _finalize(self, whisper_model, buf: List[bytes], language: Optional[str], reason: str):
+    def _finalize(self, model, buf: List[bytes], language: Optional[str], reason: str):
         """Transcribe buffered audio, emit transcript + listening_end."""
-        text = self._do_transcribe(whisper_model, buf, language)
+        text = self._do_transcribe(model, buf, language)
         if text:
             self.emit({
                 "event": "transcript",
@@ -329,7 +309,7 @@ class SpeechEngine:
             "  First run will download the model (~75 MB for 'base')."
         )
         try:
-            asr_model = _load_whisper_backend(whisper_model_name, whisper_device, compute_type)
+            asr_model = _load_whisper_model(whisper_model_name, whisper_device, compute_type)
         except Exception as exc:
             self.emit({
                 "event": "error", "code": "model_not_found",
@@ -339,7 +319,7 @@ class SpeechEngine:
             raise
 
         lang_desc = language if language else "auto/mixed (Chinese + English)"
-        logger.info(f"Whisper backend ready [{asr_model.name}].  Language: {lang_desc}")
+        logger.info(f"faster-whisper model ready.  Language: {lang_desc}")
 
         # ── Build wake word detector (once) ──────────────────────────────────
         ww_enabled:    bool      = cfg_ww.get("enabled", True)
