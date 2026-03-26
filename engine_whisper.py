@@ -436,6 +436,142 @@ class SpeechEngine:
             })
         self.emit({"event": "listening_end", "reason": reason, "ts": time.time()})
 
+    # ── Model management ─────────────────────────────────────────────────────
+
+    def preload(self):
+        """Load the Whisper model and wake word detector now, before any start()
+        call.  Safe to call from the server startup thread; idempotent — calling
+        it again is a no-op if the config has not changed."""
+        self._ensure_models_loaded()
+
+    def _ensure_models_loaded(self):
+        """Load (or reuse cached) Whisper model and wake word detector.
+        Called by preload() at server startup and by _run() on every start().
+        The second and subsequent calls are nearly instant thanks to caching."""
+        cfg_whisper = self.config.get("whisper", {})
+        cfg_ww      = self.config["wake_word"]
+
+        whisper_model_name: str           = cfg_whisper.get("model", "base")
+        whisper_device:     str           = cfg_whisper.get("device", "cpu")
+        compute_type:       str           = cfg_whisper.get("compute_type", "int8")
+        language:           Optional[str] = cfg_whisper.get("language")
+        keywords:           List[str]     = cfg_ww.get("keywords", ["小智"])
+        sensitivity:        float         = cfg_ww.get("sensitivity", 0.5)
+        resolved_mode                     = _resolve_mode(cfg_ww.get("mode", "auto"), keywords)
+
+        # ── Whisper model ──────────────────────────────────────────────────
+        model_key = (whisper_model_name, whisper_device, compute_type)
+        if self._asr_model is not None and self._model_key == model_key:
+            logger.info(
+                f"[preload] Whisper model '{whisper_model_name}' already loaded — skipping."
+            )
+            asr_model = self._asr_model
+        else:
+            logger.info(
+                f"[preload] Loading Whisper model '{whisper_model_name}' "
+                f"(device={whisper_device}, compute_type={compute_type}) …"
+            )
+            logger.info(
+                "[preload]   First run downloads the model from HuggingFace Hub "
+                "(~75 MB for 'base')."
+            )
+            try:
+                _stub_av_if_needed()
+                _fix_ctranslate2_dlls()
+                from faster_whisper import WhisperModel
+                asr_model = WhisperModel(
+                    whisper_model_name,
+                    device       = whisper_device,
+                    compute_type = compute_type,
+                )
+                _dummy = np.zeros(int(_WHISPER_SAMPLE_RATE * 0.1), dtype=np.float32)
+                list(asr_model.transcribe(_dummy, beam_size=1)[0])
+            except Exception as exc:
+                _exc_s = str(exc).lower()
+                if any(k in _exc_s for k in ("cublas", "cudnn", "libcuda", "cuda")):
+                    logger.warning(
+                        f"[preload] compute_type={compute_type!r} triggered a CUDA "
+                        f"dependency ({exc}); falling back to float32 on cpu."
+                    )
+                    compute_type   = "float32"
+                    whisper_device = "cpu"
+                    asr_model = WhisperModel(
+                        whisper_model_name, device="cpu", compute_type="float32"
+                    )
+                else:
+                    self.emit({
+                        "event":   "error",
+                        "code":    "model_not_found",
+                        "message": f"Failed to load Whisper model '{whisper_model_name}': {exc}",
+                        "ts":      time.time(),
+                    })
+                    raise
+            self._asr_model   = asr_model
+            self._model_key   = (whisper_model_name, whisper_device, compute_type)
+            self._ww_detector = None   # model changed → force WW rebuild
+            lang_desc = language if language else "auto/mixed (Chinese + English)"
+            logger.info(f"[preload] Whisper model ready.  Language: {lang_desc}")
+
+        # ── Wake word detector ─────────────────────────────────────────────
+        ww_enabled = cfg_ww.get("enabled", True)
+        ww_key = (
+            resolved_mode,
+            tuple(keywords),
+            sensitivity,
+            tuple(cfg_ww.get("openwakeword_models") or []),
+            self.config.get("asr", {}).get("model_path", ""),
+        )
+        if self._ww_detector is not None and self._ww_key == ww_key:
+            logger.info("[preload] Wake word detector already loaded — skipping.")
+        else:
+            ww_detector = None
+            if ww_enabled and keywords:
+                if resolved_mode == "whisper":
+                    ww_detector = _WhisperWakeWordDetector(
+                        asr_model, keywords, language, _WHISPER_SAMPLE_RATE
+                    )
+                else:
+                    try:
+                        if resolved_mode == "vosk":
+                            import vosk
+                            vosk.SetLogLevel(-1)
+                            ww_model_path = self.config.get("asr", {}).get(
+                                "model_path", "models/vosk-model-small-cn-0.22"
+                            )
+                            logger.info(f"[preload] Loading Vosk model: {ww_model_path}")
+                            vosk_model  = vosk.Model(ww_model_path)
+                            ww_detector = _VoskWakeWordDetector(
+                                vosk_model, _WHISPER_SAMPLE_RATE, keywords
+                            )
+                        else:  # openwakeword
+                            oww_models  = cfg_ww.get("openwakeword_models") or keywords
+                            ww_detector = _OpenWakeWordDetector(oww_models, sensitivity)
+                    except Exception as exc:
+                        logger.warning(
+                            f"[preload] Wake word init failed ({exc}); "
+                            "falling back to Whisper mode."
+                        )
+                        self.emit({
+                            "event":   "error",
+                            "code":    "wake_word_fallback",
+                            "message": (
+                                f"Primary wake-word backend unavailable ({exc}); "
+                                "switched to Whisper wake-word."
+                            ),
+                            "ts": time.time(),
+                        })
+                        resolved_mode = "whisper"
+                        ww_detector   = _WhisperWakeWordDetector(
+                            asr_model, keywords, language, _WHISPER_SAMPLE_RATE
+                        )
+            self._ww_detector      = ww_detector
+            self._ww_key           = ww_key
+            self._ww_resolved_mode = resolved_mode
+            logger.info(
+                "[preload] Wake word: " + ("enabled" if ww_enabled else "disabled")
+                + (f" [{resolved_mode}]" if ww_enabled else "")
+            )
+
     # ── Main audio pipeline ───────────────────────────────────────────────────
 
     def _run(self):
@@ -451,144 +587,23 @@ class SpeechEngine:
         energy_threshold:  float = cfg_audio.get("energy_threshold", 0.02)
         device                   = cfg_audio.get("device") or None
 
-        # Whisper-specific settings
-        whisper_model_name: str            = cfg_whisper.get("model", "base")
-        whisper_device:     str            = cfg_whisper.get("device", "cpu")
-        compute_type:       str            = cfg_whisper.get("compute_type", "int8")
-        language:            Optional[str] = cfg_whisper.get("language")   # None = auto/mixed
-        max_silence_ms:      int          = cfg_whisper.get("max_silence_ms", 1500)
+        # Whisper-specific settings used by the audio loop
+        language:            Optional[str] = cfg_whisper.get("language")
+        max_silence_ms:      int          = cfg_whisper.get("max_silence_ms", 2500)
         max_listen_ms:       int          = cfg_whisper.get("max_listen_ms", 30000)
         partial_interval_ms: int          = cfg_whisper.get("partial_interval_ms", 2000)
-        # VAD-mode interaction tuning
         vad_cooldown_ms:     int          = cfg_whisper.get("vad_cooldown_ms", 500)
         vad_min_speech_ms:   int          = cfg_whisper.get("vad_min_speech_ms", 200)
-        # Minimum recording duration before silence-end can trigger (prevents cutting off first word)
         min_listen_ms:       int          = cfg_whisper.get("min_listen_ms", 600)
-        # Whisper initial prompt (steers model toward desired language/content style)
-        initial_prompt: Optional[str]     = cfg_whisper.get("initial_prompt")
-        self._initial_prompt              = initial_prompt
+        self._initial_prompt               = cfg_whisper.get("initial_prompt")
 
-        # ── Load Whisper model (cached — skipped on subsequent start() calls) ──
-        model_key = (whisper_model_name, whisper_device, compute_type)
-        if self._asr_model is not None and self._model_key == model_key:
-            logger.info(
-                f"Reusing cached Whisper model '{whisper_model_name}' "
-                f"(device={whisper_device}) — instant start."
-            )
-            asr_model = self._asr_model
-        else:
-            logger.info(
-                f"Loading Whisper model '{whisper_model_name}' "
-                f"(device={whisper_device}, compute_type={compute_type}) …"
-            )
-            logger.info(
-                "  First run downloads the model from HuggingFace Hub (~75 MB for 'base')."
-            )
-            try:
-                _stub_av_if_needed()
-                _fix_ctranslate2_dlls()
-                from faster_whisper import WhisperModel
-                asr_model = WhisperModel(
-                    whisper_model_name,
-                    device       = whisper_device,
-                    compute_type = compute_type,
-                )
-                # Warm-up: catch CUDA dependency errors before the mic opens.
-                _dummy = np.zeros(int(_WHISPER_SAMPLE_RATE * 0.1), dtype=np.float32)
-                list(asr_model.transcribe(_dummy, beam_size=1)[0])
-            except Exception as exc:
-                _exc_s = str(exc).lower()
-                if any(k in _exc_s for k in ("cublas", "cudnn", "libcuda", "cuda")):
-                    logger.warning(
-                        f"compute_type={compute_type!r} triggered a CUDA dependency "
-                        f"({exc}); falling back to float32 on cpu."
-                    )
-                    compute_type   = "float32"
-                    whisper_device = "cpu"
-                    asr_model = WhisperModel(
-                        whisper_model_name, device="cpu", compute_type="float32"
-                    )
-                else:
-                    self.emit({
-                        "event": "error", "code": "model_not_found",
-                        "message": f"Failed to load Whisper model '{whisper_model_name}': {exc}",
-                        "ts": time.time(),
-                    })
-                    raise
-            # Cache for future start() calls
-            self._asr_model  = asr_model
-            self._model_key  = (whisper_model_name, whisper_device, compute_type)
-            self._ww_detector = None   # model changed → rebuild wake word detector
-
-        lang_desc = language if language else "auto/mixed (Chinese + English)"
-        logger.info(f"Whisper model ready.  Language: {lang_desc}")
-
-        # ── Build wake word detector (cached — skipped on subsequent start()) ──
-        ww_enabled:    bool      = cfg_ww.get("enabled", True)
-        keywords:      List[str] = cfg_ww.get("keywords", ["小智"])
-        sensitivity:   float     = cfg_ww.get("sensitivity", 0.5)
-        mode_cfg                 = cfg_ww.get("mode", "auto")
-        resolved_mode            = _resolve_mode(mode_cfg, keywords)
-
-        ww_key = (
-            resolved_mode,
-            tuple(keywords),
-            sensitivity,
-            tuple(cfg_ww.get("openwakeword_models") or []),
-            self.config.get("asr", {}).get("model_path", ""),
-        )
-
-        if self._ww_detector is not None and self._ww_key == ww_key:
-            logger.info("Reusing cached wake word detector — instant start.")
-            ww_detector   = self._ww_detector
-            resolved_mode = self._ww_resolved_mode
-        else:
-            ww_detector = None
-            if ww_enabled and keywords:
-                if resolved_mode == "whisper":
-                    ww_detector = _WhisperWakeWordDetector(
-                        asr_model, keywords, language, sample_rate
-                    )
-                else:
-                    try:
-                        if resolved_mode == "vosk":
-                            import vosk
-                            vosk.SetLogLevel(-1)
-                            ww_model_path = self.config.get("asr", {}).get(
-                                "model_path", "models/vosk-model-small-cn-0.22"
-                            )
-                            logger.info(f"Loading Vosk wake-word model: {ww_model_path}")
-                            vosk_model  = vosk.Model(ww_model_path)
-                            ww_detector = _VoskWakeWordDetector(vosk_model, sample_rate, keywords)
-                        else:  # openwakeword
-                            oww_models  = cfg_ww.get("openwakeword_models") or keywords
-                            ww_detector = _OpenWakeWordDetector(oww_models, sensitivity)
-                    except Exception as exc:
-                        logger.warning(
-                            f"Wake word init failed ({exc}); "
-                            "falling back to Whisper wake-word mode."
-                        )
-                        self.emit({
-                            "event": "error", "code": "wake_word_fallback",
-                            "message": (
-                                f"Primary wake-word backend unavailable ({exc}); "
-                                "switched to Whisper wake-word."
-                            ),
-                            "ts": time.time(),
-                        })
-                        resolved_mode = "whisper"
-                        ww_detector   = _WhisperWakeWordDetector(
-                            asr_model, keywords, language, sample_rate
-                        )
-            # Cache the detector and its effective resolved mode
-            self._ww_detector      = ww_detector
-            self._ww_key           = ww_key
-            self._ww_resolved_mode = resolved_mode
-
-        logger.info(
-            "Wake word: " + ("enabled" if ww_enabled else "disabled")
-            + (f" [{resolved_mode}]" if ww_enabled else "")
-        )
+        # ── Load / reuse cached models ────────────────────────────────────────
+        # (preload() at server startup means this is a no-op on start() calls)
+        self._ensure_models_loaded()
+        asr_model     = self._asr_model
+        ww_detector   = self._ww_detector
+        resolved_mode = self._ww_resolved_mode
+        ww_enabled    = self.config["wake_word"].get("enabled", True)
 
         # ── Hot-plug device loop ──────────────────────────────────────────────
         while not self._stop_event.is_set():

@@ -274,10 +274,22 @@ class SpeechServer:
         self.logger.info(f"  Device     : {wcfg.get('device', 'cpu')} / {wcfg.get('compute_type', 'int8')}")
         self.logger.info(border)
 
+        # Pre-load Whisper model + wake word detector before accepting connections
+        # so that the first start() command from the client is near-instant.
+        self.logger.info("Pre-loading models (this may take a moment on first run)…")
+        try:
+            await self.loop.run_in_executor(None, self.engine.preload)
+            self.logger.info("Models ready.  Server accepting connections.")
+        except Exception as exc:
+            self.logger.error(
+                f"Model pre-load failed: {exc}.  "
+                "start() will retry loading when called by the client."
+            )
+
         try:
             async with websockets.serve(self._handle_client, host, port):
                 self.logger.info(
-                    "Server ready.  Open index.html (change port to 8766) to connect.  "
+                    "Open index.html (change port to 8766) to connect.  "
                     "Ctrl+C to stop."
                 )
                 while True:
