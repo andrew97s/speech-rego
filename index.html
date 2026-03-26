@@ -305,6 +305,30 @@
 
   /* ── Mode selector hint colours ──────────────────────────────── */
   #modeHint { border-left-width: 2px; }
+
+  /* ── Env check panel ─────────────────────────────────────────── */
+  .env-check-list { list-style: none; margin-top: 6px; }
+  .env-item {
+    display: flex; align-items: flex-start; gap: 8px;
+    padding: 5px 0; border-bottom: 1px solid var(--border);
+    font-size: .8rem; line-height: 1.4;
+  }
+  .env-item:last-child { border-bottom: none; }
+  .env-icon {
+    font-size: .95rem; width: 16px; text-align: center; flex-shrink: 0; margin-top: 1px;
+  }
+  .env-ok    .env-icon { color: var(--success); }
+  .env-warn  .env-icon { color: var(--warn); }
+  .env-error .env-icon { color: var(--danger); }
+  .env-info  .env-icon { color: var(--muted); }
+  .env-name   { font-weight: 500; flex-shrink: 0; margin-right: 4px; }
+  .env-detail { color: var(--muted); font-size: .74rem; word-break: break-all; }
+  .env-checking { color: var(--muted); font-size: .8rem; padding: 6px 0;
+                  animation: pulse 1s infinite; }
+  .env-summary { font-size: .78rem; font-weight: 600; margin-top: 8px; }
+  .env-summary-ok   { color: var(--success); }
+  .env-summary-warn { color: var(--warn); }
+  .env-summary-err  { color: var(--danger); }
 </style>
 </head>
 <body>
@@ -411,6 +435,20 @@
       </div>
 
     </div><!-- /config card -->
+
+    <!-- Env check -->
+    <div class="card">
+      <div class="card-title" style="display:flex;align-items:center;justify-content:space-between;">
+        <span>环境检测</span>
+        <button class="btn btn-ghost btn-sm" id="btnCheck" onclick="checkEnv()">&#128269; 检测</button>
+      </div>
+      <ul class="env-check-list" id="envList">
+        <li style="color:var(--muted);font-size:.8rem;padding:4px 0">
+          点击「检测」按钮检查运行环境（需要已连接服务器）
+        </li>
+      </ul>
+      <div class="env-summary" id="envSummary"></div>
+    </div>
 
   </div><!-- /left panel -->
 
@@ -582,6 +620,9 @@
     } else if (event === 'config_updated') {
       logEvent('system', '配置更新: ' + msg.key + ' = ' + JSON.stringify(msg.value));
 
+    } else if (event === 'env_check') {
+      renderEnvCheck(msg.items || []);
+
     } else if (event === 'error') {
       logEvent('error', '[' + msg.code + '] ' + (msg.message || ''));
       if (msg.code === 'no_device') {
@@ -726,6 +767,50 @@
       case 'config_updated':  return 'config_updated: ' + msg.key + ' = ' + JSON.stringify(msg.value);
       case 'error':           return 'error [' + msg.code + ']: ' + (msg.message || '');
       default:                return JSON.stringify(msg);
+    }
+  }
+
+  // ── Env check ────────────────────────────────────────────────────────────────
+  function checkEnv() {
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      logEvent('error', '请先连接服务器再检测环境');
+      return;
+    }
+    const list = document.getElementById('envList');
+    list.innerHTML = '<li class="env-checking">&#9679; 检测中，请稍候…</li>';
+    document.getElementById('envSummary').textContent = '';
+    send({ cmd: 'check' });
+  }
+
+  function renderEnvCheck(items) {
+    const ICON  = { ok: '✓', warn: '⚠', error: '✗', info: '·' };
+    const list  = document.getElementById('envList');
+    const sumEl = document.getElementById('envSummary');
+    list.innerHTML = '';
+
+    let errors = 0, warns = 0;
+    items.forEach(item => {
+      const li = document.createElement('li');
+      li.className = 'env-item env-' + item.status;
+      li.innerHTML =
+        '<span class="env-icon">' + (ICON[item.status] || '?') + '</span>' +
+        '<span><span class="env-name">' + escHtml(item.name) + '</span>' +
+        (item.detail ? '<span class="env-detail">' + escHtml(item.detail) + '</span>' : '') +
+        '</span>';
+      list.appendChild(li);
+      if (item.status === 'error') errors++;
+      if (item.status === 'warn')  warns++;
+    });
+
+    if (errors > 0) {
+      sumEl.className = 'env-summary env-summary-err';
+      sumEl.textContent = `✗ 发现 ${errors} 个错误，请参照上方提示修复后再启动服务`;
+    } else if (warns > 0) {
+      sumEl.className = 'env-summary env-summary-warn';
+      sumEl.textContent = `⚠ ${warns} 个警告，基本功能可用，部分功能受限`;
+    } else {
+      sumEl.className = 'env-summary env-summary-ok';
+      sumEl.textContent = '✓ 所有依赖正常，服务可以启动';
     }
   }
 

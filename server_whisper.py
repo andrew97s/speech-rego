@@ -216,6 +216,24 @@ class SpeechServer:
             self.engine.cancel_listen()
             await ws.send(json.dumps({"event": "ack", "cmd": "cancel", "ts": ts}))
 
+        elif cmd == "check":
+            # Run env check in a thread; results sent back as "env_check" event
+            async def _run_check(ws=ws, ts=ts):
+                try:
+                    loop = asyncio.get_running_loop()
+                    from check_env import run_checks
+                    items = await loop.run_in_executor(None, run_checks)
+                    await ws.send(json.dumps({
+                        "event": "env_check", "items": items, "ts": time.time(),
+                    }))
+                except Exception as exc:
+                    await ws.send(json.dumps({
+                        "event": "error", "code": "check_failed",
+                        "message": str(exc), "ts": time.time(),
+                    }))
+            asyncio.create_task(_run_check())
+            await ws.send(json.dumps({"event": "ack", "cmd": "check", "ts": ts}))
+
         elif cmd == "status":
             await ws.send(json.dumps(self._status_event()))
 
