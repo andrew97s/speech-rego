@@ -507,15 +507,39 @@ class SpeechEngine:
                 list(asr_model.transcribe(_dummy, beam_size=1)[0])
             except Exception as exc:
                 _exc_s = str(exc).lower()
-                if any(k in _exc_s for k in ("cublas", "cudnn", "libcuda", "cuda")):
-                    logger.warning(
-                        f"[preload] compute_type={compute_type!r} triggered a CUDA "
-                        f"dependency ({exc}); falling back to float32 on cpu."
-                    )
-                    compute_type   = "float32"
-                    whisper_device = "cpu"
-                    asr_model = WhisperModel(
-                        whisper_model_name, device="cpu", compute_type="float32"
+                _is_cuda_dll   = any(k in _exc_s for k in ("cublas", "cudnn", "libcuda", "cuda"))
+                _is_compute    = any(k in _exc_s for k in ("compute type", "float16", "not supported"))
+                if _is_cuda_dll or _is_compute:
+                    # Step 1: if float16 failed but CUDA is otherwise available, retry int8 on GPU
+                    if _is_compute and not _is_cuda_dll and whisper_device == "cuda":
+                        logger.warning(
+                            f"[preload] compute_type={compute_type!r} not supported on this GPU "
+                            f"({exc}); retrying with int8 on cuda."
+                        )
+                        try:
+                            asr_model = WhisperModel(
+                                whisper_model_name, device="cuda", compute_type="int8"
+                            )
+                            compute_type = "int8"
+                            logger.info("[preload] cuda+int8 fallback succeeded.")
+                        except Exception as exc2:
+                            logger.warning(f"[preload] cuda+int8 also failed ({exc2}); falling back to cpu.")
+                            compute_type   = "float32"
+                            whisper_device = "cpu"
+                            asr_model = WhisperModel(
+                                whisper_model_name, device="cpu", compute_type="float32"
+                            )
+                    else:
+                        # CUDA DLLs missing or unrecognised compute error → CPU float32
+                        logger.warning(
+                            f"[preload] compute_type={compute_type!r} triggered a CUDA "
+                            f"dependency ({exc}); falling back to float32 on cpu."
+                        )
+                        compute_type   = "float32"
+                        whisper_device = "cpu"
+                        asr_model = WhisperModel(
+                            whisper_model_name, device="cpu", compute_type="float32"
+                        )
                     )
                 else:
                     self.emit({
@@ -529,7 +553,10 @@ class SpeechEngine:
             self._model_key   = (whisper_model_name, whisper_device, compute_type)
             self._ww_detector = None   # model changed → force WW rebuild
             lang_desc = language if language else "auto/mixed (Chinese + English)"
-            logger.info(f"[preload] Whisper model ready.  Language: {lang_desc}")
+            logger.info(
+                f"[preload] Whisper model ready — "
+                f"device={whisper_device} compute_type={compute_type}  language={lang_desc}"
+            )
 
         # ── Wake word detector ─────────────────────────────────────────────
         ww_enabled = cfg_ww.get("enabled", True)
