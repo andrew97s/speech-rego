@@ -119,8 +119,10 @@ if (-not $OutputDir) {
 # Persistent model cache — lives next to the script, NEVER deleted on rebuild.
 # Re-running the build reuses cached models (no re-download).
 $CacheDir      = Join-Path $ScriptDir ".offline-cache"
-$WModelCacheHF = Join-Path $CacheDir "hf"        # HuggingFace / Whisper cache
-$VoskCacheDir  = Join-Path $CacheDir "vosk"       # Vosk model cache
+$WModelCacheHF = Join-Path $CacheDir "hf"         # HuggingFace / Whisper cache
+$VoskCacheDir  = Join-Path $CacheDir "vosk"        # Vosk model cache
+$OWWCacheDir   = Join-Path $CacheDir "oww-models"  # openwakeword 模型缓存
+$PipCacheDir   = Join-Path $CacheDir "pip-cache"   # pip wheel 缓存（自动被 pip 使用）
 
 $PY_VER     = "3.11.9"
 $PY_ZIP     = "python-$PY_VER-embed-amd64.zip"
@@ -153,9 +155,11 @@ Write-Host $border -ForegroundColor Cyan
 Write-Step 1 "准备输出目录"
 
 # Ensure persistent cache dirs exist (never removed)
-foreach ($d in @($CacheDir, $WModelCacheHF, $VoskCacheDir)) {
+foreach ($d in @($CacheDir, $WModelCacheHF, $VoskCacheDir, $OWWCacheDir, $PipCacheDir)) {
     New-Item -ItemType Directory -Force -Path $d | Out-Null
 }
+# pip respects PIP_CACHE_DIR automatically — all pip install calls use the cache
+$env:PIP_CACHE_DIR = $PipCacheDir
 
 if (Test-Path $OutputDir) {
     $ans = Read-Host "  '$OutputDir' 已存在，是否覆盖重建? [y/N]"
@@ -396,19 +400,39 @@ if ($IncludeVosk) {
 
     # Pre-fetch openwakeword built-in models (only if OWW was installed)
     if ($IncludeOWW) {
-        Write-Info "Pre-downloading openwakeword models..."
-        $owwPy = Join-Path $env:TEMP "oww_dl_$PID.py"
-        @'
+        # Check persistent cache first
+        $owwCached = @(Get-ChildItem $OWWCacheDir -Filter "*.onnx" -ErrorAction SilentlyContinue)
+        if ($owwCached.Count -gt 0) {
+            Write-Ok "openwakeword 模型已缓存（$($owwCached.Count) 个），跳过下载"
+        } else {
+            Write-Info "下载 openwakeword 内置模型（从 GitHub，首次约需 1-2 分钟）..."
+            $owwPy = Join-Path $env:TEMP "oww_dl_$PID.py"
+            @'
 import warnings; warnings.filterwarnings("ignore")
 try:
     import openwakeword
-    openwakeword.utils.download_models()
-    print("  openwakeword models ready.")
+    models_dir = "__OWWCACHE__"
+    openwakeword.utils.download_models(models_dir=models_dir)
+    import os, glob
+    n = len(glob.glob(os.path.join(models_dir, "*.onnx")))
+    print("  openwakeword: %d models downloaded to %s" % (n, models_dir))
 except Exception as e:
     print("  [skip] " + str(e))
 '@ | Set-Content $owwPy -Encoding UTF8
-        & $PyExe $owwPy 2>$null
-        Remove-Item $owwPy -Force -ErrorAction SilentlyContinue
+            $owwEscaped = $OWWCacheDir -replace '\\', '\\\\'
+            (Get-Content $owwPy -Raw -Encoding UTF8) -replace '__OWWCACHE__', $owwEscaped |
+                Set-Content $owwPy -Encoding UTF8
+            & $PyExe $owwPy
+            Remove-Item $owwPy -Force -ErrorAction SilentlyContinue
+        }
+
+        # Copy cached models into the output package's openwakeword resources dir
+        $owwPkgModels = Join-Path $PythonDir "Lib\site-packages\openwakeword\resources\models"
+        if ((Test-Path $owwPkgModels) -and
+            (@(Get-ChildItem $OWWCacheDir -Filter "*.onnx" -ErrorAction SilentlyContinue).Count -gt 0)) {
+            robocopy $OWWCacheDir $owwPkgModels /E /NFL /NDL /NJH /NJS /NC /NS /NP | Out-Null
+            Write-Ok "openwakeword 模型已复制到包内"
+        }
     }
 } else {
     Write-Step 6 "跳过 Vosk 模型（IncludeVosk=False）"
