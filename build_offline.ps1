@@ -408,38 +408,47 @@ if ($IncludeVosk) {
 
     # Pre-fetch openwakeword built-in models (only if OWW was installed)
     if ($IncludeOWW) {
+        $owwPkgModels = Join-Path $PythonDir "Lib\site-packages\openwakeword\resources\models"
+
         # Check persistent cache first
         $owwCached = @(Get-ChildItem $OWWCacheDir -Filter "*.onnx" -ErrorAction SilentlyContinue)
         if ($owwCached.Count -gt 0) {
             Write-Ok "openwakeword 模型已缓存（$($owwCached.Count) 个），跳过下载"
+            # Restore from cache into package
+            if (Test-Path $owwPkgModels) {
+                robocopy $OWWCacheDir $owwPkgModels /E /NFL /NDL /NJH /NJS /NC /NS /NP | Out-Null
+                Write-Ok "openwakeword 模型已从缓存复制到包内"
+            }
         } else {
             Write-Info "下载 openwakeword 内置模型（从 GitHub，首次约需 1-2 分钟）..."
+            # Download to default package location (openwakeword reads models from there)
             $owwPy = Join-Path $env:TEMP "oww_dl_$PID.py"
             @'
 import warnings; warnings.filterwarnings("ignore")
 try:
     import openwakeword
-    models_dir = "__OWWCACHE__"
-    openwakeword.utils.download_models(models_dir=models_dir)
+    openwakeword.utils.download_models()
     import os, glob
+    pkg_dir = os.path.dirname(openwakeword.__file__)
+    models_dir = os.path.join(pkg_dir, "resources", "models")
     n = len(glob.glob(os.path.join(models_dir, "*.onnx")))
-    print("  openwakeword: %d models downloaded to %s" % (n, models_dir))
+    print("  openwakeword: %d models in %s" % (n, models_dir))
 except Exception as e:
     print("  [skip] " + str(e))
 '@ | Set-Content $owwPy -Encoding UTF8
-            $owwEscaped = $OWWCacheDir -replace '\\', '\\\\'
-            (Get-Content $owwPy -Raw -Encoding UTF8) -replace '__OWWCACHE__', $owwEscaped |
-                Set-Content $owwPy -Encoding UTF8
             & $PyExe $owwPy
             Remove-Item $owwPy -Force -ErrorAction SilentlyContinue
-        }
 
-        # Copy cached models into the output package's openwakeword resources dir
-        $owwPkgModels = Join-Path $PythonDir "Lib\site-packages\openwakeword\resources\models"
-        if ((Test-Path $owwPkgModels) -and
-            (@(Get-ChildItem $OWWCacheDir -Filter "*.onnx" -ErrorAction SilentlyContinue).Count -gt 0)) {
-            robocopy $OWWCacheDir $owwPkgModels /E /NFL /NDL /NJH /NJS /NC /NS /NP | Out-Null
-            Write-Ok "openwakeword 模型已复制到包内"
+            # Back up downloaded models to persistent cache
+            if (Test-Path $owwPkgModels) {
+                $downloaded = @(Get-ChildItem $owwPkgModels -Filter "*.onnx" -ErrorAction SilentlyContinue)
+                if ($downloaded.Count -gt 0) {
+                    robocopy $owwPkgModels $OWWCacheDir /E /NFL /NDL /NJH /NJS /NC /NS /NP | Out-Null
+                    Write-Ok "openwakeword 模型已缓存（$($downloaded.Count) 个）"
+                } else {
+                    Write-Warn "openwakeword 模型下载后仍为空，唤醒词将回退到 Whisper 模式"
+                }
+            }
         }
     }
 } else {
