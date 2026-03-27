@@ -195,18 +195,26 @@ Write-Ok "Python $PY_VER 嵌入式运行时就绪"
 
 # ── STEP 3: pip ────────────────────────────────────────────────────────────────
 Write-Step 3 "安装 pip"
-$getPipTmp = Join-Path $PythonDir "get-pip.py"
-try {
-    if (Get-Command curl.exe -ErrorAction SilentlyContinue) {
-        & curl.exe -L --silent -o $getPipTmp $GETPIP_URL
-    } else {
-        Invoke-WebRequest -Uri $GETPIP_URL -OutFile $getPipTmp -UseBasicParsing
-    }
-} catch { Write-Fail "get-pip.py 下载失败：$_" }
+# Cache get-pip.py in TEMP so rebuild doesn't re-download it
+$getPipCache = Join-Path $env:TEMP "get-pip.py"
+if (-not (Test-Path $getPipCache)) {
+    Write-Info "下载 get-pip.py ($GETPIP_URL) ..."
+    try {
+        if (Get-Command curl.exe -ErrorAction SilentlyContinue) {
+            & curl.exe -L --progress-bar -o $getPipCache $GETPIP_URL
+        } else {
+            Invoke-WebRequest -Uri $GETPIP_URL -OutFile $getPipCache -UseBasicParsing
+        }
+    } catch { Write-Fail "get-pip.py 下载失败：$_" }
+} else {
+    Write-Info "使用本地缓存：$getPipCache"
+}
+Copy-Item $getPipCache (Join-Path $PythonDir "get-pip.py") -Force
 
-& $PyExe $getPipTmp --quiet
+Write-Info "运行 get-pip.py ..."
+& $PyExe (Join-Path $PythonDir "get-pip.py")
 if ($LASTEXITCODE -ne 0) { Write-Fail "pip 安装失败" }
-Remove-Item $getPipTmp -Force -ErrorAction SilentlyContinue
+Remove-Item (Join-Path $PythonDir "get-pip.py") -Force -ErrorAction SilentlyContinue
 Write-Ok "pip 安装成功"
 
 # ── STEP 4: Python packages ────────────────────────────────────────────────────
