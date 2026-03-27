@@ -513,13 +513,18 @@ Write-Step 8 "生成启动脚本"
 Set-Content (Join-Path $OutputDir "start_whisper.bat") @"
 @echo off
 chcp 65001 >nul
-setlocal
+setlocal enabledelayedexpansion
 set PYTHONIOENCODING=utf-8
 set PYTHONUTF8=1
 :: 禁止 HuggingFace 联网（模型已展开到 models\whisper-$WhisperModel\）
 set TRANSFORMERS_OFFLINE=1
 set HF_DATASETS_OFFLINE=1
 cd /d "%~dp0"
+:: 将 nvidia pip 包的 DLL 目录加入 PATH，确保 ctranslate2 能加载 cublas64_12.dll 等
+:: (no-op if directory doesn't exist — safe for CPU-only packages)
+for /d %%P in ("%~dp0python\Lib\site-packages\nvidia\*") do (
+    if exist "%%P\bin\" set "PATH=%%P\bin;!PATH!"
+)
 title 语音识别服务 (Whisper) - ws://127.0.0.1:8766
 echo.
 echo  ================================================
