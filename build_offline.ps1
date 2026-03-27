@@ -42,8 +42,8 @@
 
 param(
     [string] $WhisperModel = "small",
-    [ValidateSet("none","cuda","dml")]
-    [string] $GPU          = "none",
+    [ValidateSet("none","cuda","dml","auto")]
+    [string] $GPU          = "auto",
     [bool]   $IncludeVosk  = $true,
     [string] $OutputDir    = ""
 )
@@ -59,7 +59,57 @@ function Write-Warn { param($msg) Write-Host " [!!] $msg"    -ForegroundColor Ye
 function Write-Fail { param($msg) Write-Host " [XX] $msg"    -ForegroundColor Red; exit 1 }
 function Write-Info { param($msg) Write-Host "      $msg" }
 
-# ── Paths & versions ──────────────────────────────────────────────────────────
+# ── GPU auto-detection ────────────────────────────────────────────────────────
+# Runs before directory creation so detection result is shown in the banner.
+if ($GPU -eq "auto") {
+    Write-Host "`n[GPU] Auto-detecting GPU ..." -ForegroundColor Cyan
+    $detected = "none"
+
+    # Query all GPU adapters via WMI
+    $gpuList = @(Get-WmiObject -Class Win32_VideoController -ErrorAction SilentlyContinue |
+                 Where-Object { $_.Name -ne "" } |
+                 Select-Object Name, DriverVersion)
+
+    foreach ($g in $gpuList) {
+        Write-Info "  Found: $($g.Name)  driver $($g.DriverVersion)"
+    }
+
+    # Check for NVIDIA with CUDA 12 capable driver (Windows driver 527.41+ = WDDM 3.1.x)
+    $nvidiaGpu = $gpuList | Where-Object {
+        $_.Name -match "NVIDIA|GeForce|Quadro|Tesla"
+    } | Select-Object -First 1
+
+    if ($nvidiaGpu) {
+        $drvParts = ($nvidiaGpu.DriverVersion -split "\.")
+        # Windows WDDM driver: last two segments encode the real driver version
+        # e.g. "31.0.15.5154" -> 15*100 + (5154/100) ~ 527 -> CUDA 12 ok
+        try {
+            $seg3 = [int]$drvParts[2]   # e.g. 15
+            $seg4 = [int]$drvParts[3]   # e.g. 5154
+            # Approximate NVIDIA driver version: seg3 * 100 + floor(seg4 / 100)
+            $approxDrv = $seg3 * 100 + [math]::Floor($seg4 / 100)
+            Write-Info "  NVIDIA driver ~$approxDrv"
+            if ($approxDrv -ge 527) {
+                $detected = "cuda"
+                Write-Ok "  NVIDIA driver >= 527 -> CUDA 12 supported -> selecting cuda mode"
+            } else {
+                $detected = "dml"
+                Write-Warn "  NVIDIA driver < 527 (CUDA 12 needs 527+) -> falling back to dml"
+            }
+        } catch {
+            $detected = "dml"
+            Write-Warn "  Could not parse driver version -> falling back to dml"
+        }
+    } elseif ($gpuList.Count -gt 0) {
+        # Non-NVIDIA GPU (AMD / Intel) — use DirectML
+        $detected = "dml"
+        Write-Ok "  Non-NVIDIA GPU detected -> selecting dml mode"
+    } else {
+        Write-Info "  No discrete GPU found -> cpu mode"
+    }
+
+    $GPU = $detected
+}
 $ScriptDir  = Split-Path -Parent $MyInvocation.MyCommand.Path
 if (-not $OutputDir) {
     $OutputDir = Join-Path $ScriptDir "dist\SpeechReco-Offline"

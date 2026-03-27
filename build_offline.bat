@@ -19,7 +19,7 @@ setlocal
 set MODEL=%~1
 set GPU=%~2
 if "%MODEL%"=="" set MODEL=small
-if "%GPU%"==""   set GPU=none
+if "%GPU%"==""   set GPU=auto
 
 title 离线部署包构建 - Whisper:%MODEL% GPU:%GPU%
 

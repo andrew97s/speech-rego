@@ -163,19 +163,94 @@ def run_checks(config_path: str = "config.json") -> List[Dict]:
         except Exception as exc:
             add("配置文件", "error", f"读取失败：{exc}")
 
-    # ── 8. CUDA / GPU for Whisper ─────────────────────────────────────────────
+    # ── 8. GPU acceleration check ─────────────────────────────────────────────
+    _gpu_check(add)
+
+    return results
+
+
+def _gpu_check(add):
+    """Detect GPU hardware and test CUDA / DirectML availability for Whisper."""
+
+    # ── Hardware info (Windows WMI) ────────────────────────────────────────
+    gpu_names: list = []
+    nvidia_driver_ver: str = ""
+    if sys.platform == "win32":
+        try:
+            import subprocess
+            out = subprocess.check_output(
+                ["wmic", "path", "win32_VideoController",
+                 "get", "Name,DriverVersion", "/format:csv"],
+                text=True, stderr=subprocess.DEVNULL, timeout=5
+            )
+            for line in out.splitlines():
+                parts = [p.strip() for p in line.split(",")]
+                if len(parts) >= 3 and parts[1]:
+                    ver, name = parts[1], parts[2]
+                    gpu_names.append(name)
+                    if "nvidia" in name.lower() or "geforce" in name.lower() \
+                            or "quadro" in name.lower() or "tesla" in name.lower():
+                        nvidia_driver_ver = ver
+        except Exception:
+            pass
+
+    if gpu_names:
+        add("显卡", "ok", "、".join(gpu_names[:2]) + ("…" if len(gpu_names) > 2 else ""))
+    else:
+        add("显卡", "info", "未检测到独立显卡（将使用 CPU 推理）")
+
+    # ── NVIDIA driver version check ────────────────────────────────────────
+    if nvidia_driver_ver:
+        # Windows driver version format: "31.0.15.5154" → CUDA support version
+        # Driver 527.41+ supports CUDA 12; 516.94+ supports CUDA 11.8
+        try:
+            parts = [int(x) for x in nvidia_driver_ver.split(".")]
+            # On Windows the relevant part is parts[2]*100+parts[3] mapped to cuda ver
+            # Simpler: check the last two segments as a combined number
+            drv_int = parts[2] * 10000 + parts[3] if len(parts) >= 4 else 0
+            if drv_int >= 155154:   # ≈ 527.41 WDDM
+                add("NVIDIA 驱动", "ok",
+                    f"{nvidia_driver_ver} — 支持 CUDA 12 (Whisper CUDA 模式可用)")
+            elif drv_int >= 151694:  # ≈ 516.94 WDDM
+                add("NVIDIA 驱动", "warn",
+                    f"{nvidia_driver_ver} — 仅支持 CUDA 11，建议升级驱动至 527+")
+            else:
+                add("NVIDIA 驱动", "warn",
+                    f"{nvidia_driver_ver} — 版本较旧，建议升级驱动")
+        except Exception:
+            add("NVIDIA 驱动", "info", nvidia_driver_ver)
+
+    # ── CUDA via ctranslate2 ───────────────────────────────────────────────
     try:
         import ctranslate2 as ct2
         if hasattr(ct2, "get_cuda_device_count"):
             n = ct2.get_cuda_device_count()
             if n > 0:
-                add("CUDA", "ok", f"{n} 个 CUDA 设备（Whisper 可使用 GPU 加速）")
+                add("CUDA 加速", "ok",
+                    f"{n} 个设备可用 — config.json 设 whisper.device=cuda / compute_type=float16")
             else:
-                add("CUDA", "info", "无 CUDA 设备，使用 CPU 推理")
+                add("CUDA 加速", "info",
+                    "不可用（无 CUDA 设备或驱动不支持 CUDA 12）")
+        else:
+            add("CUDA 加速", "info", "ctranslate2 未能检测 CUDA 设备数")
+    except Exception as exc:
+        add("CUDA 加速", "warn", f"检测失败：{exc}")
+
+    # ── DirectML via onnxruntime ───────────────────────────────────────────
+    try:
+        import onnxruntime as ort
+        providers = ort.get_available_providers()
+        if "DmlExecutionProvider" in providers:
+            add("DirectML 加速", "ok",
+                "可用 — openwakeword 等 ONNX 模型将自动使用 GPU")
+        else:
+            if any("GPU" in p or "Dml" in p or "CUDA" in p for p in providers):
+                add("DirectML 加速", "ok", f"GPU provider: {providers}")
+            else:
+                add("DirectML 加速", "info",
+                    "不可用（onnxruntime-directml 未安装，或 DirectX 12 不支持）")
     except Exception:
         pass
-
-    return results
 
 
 # ── Standalone CLI ─────────────────────────────────────────────────────────────
