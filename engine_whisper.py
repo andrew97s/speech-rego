@@ -112,17 +112,21 @@ def _fix_ctranslate2_dlls():
 
     Strategy:
     1. Add ctranslate2's own directory to the OS DLL search path.
-    2. Evict any already-cached broken copy from sys.modules.
-    3. Re-import ctranslate2 with the corrected search path.
-    4. Scan faster_whisper/transcribe.py for every ctranslate2.Xxx and
+    2. Add every site-packages/nvidia/*/bin directory so that CUDA DLLs
+       installed via pip (nvidia-cublas-cu12, nvidia-cuda-runtime-cu12,
+       nvidia-cudnn-cu12 …) are visible to the Windows DLL loader.
+    3. Evict any already-cached broken copy from sys.modules.
+    4. Re-import ctranslate2 with the corrected search path.
+    5. Scan faster_whisper/transcribe.py for every ctranslate2.Xxx and
        ctranslate2.models.Xxx reference; stub any that are still missing.
        These symbols appear only as type annotations (never instantiated
        during numpy-array transcription), so stubs are safe at runtime.
     """
     import sys, os, re, types, importlib.util
 
-    # ── Step 1: add DLL directory (Windows only) ──────────────────
+    # ── Step 1 & 2: add DLL directories (Windows only) ───────────────
     if hasattr(os, "add_dll_directory"):
+        # ctranslate2 package dir
         spec = importlib.util.find_spec("ctranslate2")
         if spec and spec.submodule_search_locations:
             ct2_dir = str(list(spec.submodule_search_locations)[0])
@@ -130,6 +134,24 @@ def _fix_ctranslate2_dlls():
                 os.add_dll_directory(ct2_dir)
             except OSError:
                 pass
+
+        # nvidia pip packages install CUDA DLLs into
+        # site-packages/nvidia/<pkg>/bin/  (e.g. cublas64_12.dll)
+        import site
+        for sp in site.getsitepackages():
+            nvidia_root = os.path.join(sp, "nvidia")
+            if not os.path.isdir(nvidia_root):
+                continue
+            for entry in os.scandir(nvidia_root):
+                if not entry.is_dir():
+                    continue
+                bin_dir = os.path.join(entry.path, "bin")
+                if os.path.isdir(bin_dir):
+                    try:
+                        os.add_dll_directory(bin_dir)
+                        logger.debug(f"[DLL] added {bin_dir}")
+                    except OSError:
+                        pass
 
     # ── Step 2: evict broken cached module ────────────────────────
     ct2 = sys.modules.get("ctranslate2")
