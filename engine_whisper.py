@@ -4,10 +4,10 @@ Whisper-based audio pipeline engine: microphone -> wake word -> ASR -> events
 ASR backend: faster-whisper (CTranslate2), supports mixed Chinese/English
              with language=None (auto-detect per session).
 
-Wake word detection (unchanged from Vosk engine):
-  vosk         -- Vosk grammar/keyword-spotting (supports Chinese)
-  openwakeword -- openwakeword pre-trained ONNX models (English only)
-  auto         -- Chinese keywords -> vosk; ASCII keywords -> openwakeword
+Wake word detection:
+  openwakeword -- pre-trained ONNX models (English only: hey_jarvis, alexa, …)
+  whisper      -- Whisper-based keyword spotting (supports Chinese keywords)
+  auto         -- same as openwakeword
 
 State machine:
   STOPPED -> start() -> NO_DEVICE (no mic) or IDLE (mic ok)
@@ -24,6 +24,7 @@ Key difference from Vosk engine:
 
 import json
 import logging
+import os
 import queue
 import re
 import threading
@@ -210,16 +211,21 @@ def _fix_ctranslate2_dlls():
 class _OpenWakeWordDetector:
     def __init__(self, keywords: List[str], sensitivity: float):
         from openwakeword.model import Model   # type: ignore
-        self.keywords   = keywords
         self.sensitivity = sensitivity
-        self._model     = Model(wakeword_models=keywords, inference_framework="onnx")
-        logger.info(f"[WakeWord] OpenWakeWord mode -- keywords: {keywords}")
+        self._model = Model(wakeword_models=keywords, inference_framework="onnx")
+        # openwakeword resolves short names (e.g. "hey_jarvis") to full ONNX
+        # paths internally and uses those full paths as score-dict keys.
+        # We must look up scores by the same keys the Model actually uses.
+        self._score_keys = list(self._model.models.keys())
+        friendly = [os.path.splitext(os.path.basename(k))[0] for k in self._score_keys]
+        logger.info(f"[WakeWord] OpenWakeWord mode -- models: {friendly}")
 
     def process(self, audio_f32: np.ndarray) -> Optional[str]:
         scores: dict = self._model.predict(audio_f32)
-        for kw in self.keywords:
-            if float(scores.get(kw, 0.0)) >= self.sensitivity:
-                return kw
+        for key in self._score_keys:
+            if float(scores.get(key, 0.0)) >= self.sensitivity:
+                # Return a friendly name (filename without extension)
+                return os.path.splitext(os.path.basename(key))[0]
         return None
 
 
