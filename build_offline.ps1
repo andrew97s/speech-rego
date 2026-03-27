@@ -430,11 +430,10 @@ if ($IncludeVosk) {
         $owwCached = @(Get-ChildItem $OWWCacheDir -Filter "*.onnx" -ErrorAction SilentlyContinue)
         if ($owwCached.Count -gt 0) {
             Write-Ok "openwakeword 模型已缓存（$($owwCached.Count) 个），跳过下载"
-            # Restore from cache into package
-            if (Test-Path $owwPkgModels) {
-                robocopy $OWWCacheDir $owwPkgModels /E /NFL /NDL /NJH /NJS /NC /NS /NP | Out-Null
-                Write-Ok "openwakeword 模型已从缓存复制到包内"
-            }
+            # Restore from cache into package — create dir if pip didn't include it
+            New-Item -ItemType Directory -Force -Path $owwPkgModels | Out-Null
+            robocopy $OWWCacheDir $owwPkgModels /E /NFL /NDL /NJH /NJS /NC /NS /NP | Out-Null
+            Write-Ok "openwakeword 模型已从缓存复制到包内"
         } else {
             Write-Info "下载 openwakeword 内置模型（从 GitHub，首次约需 1-2 分钟）..."
             # Download to default package location (openwakeword reads models from there)
