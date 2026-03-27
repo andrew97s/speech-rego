@@ -562,7 +562,6 @@ class SpeechEngine:
                         asr_model = WhisperModel(
                             whisper_model_name, device="cpu", compute_type="float32"
                         )
-                    )
                 else:
                     self.emit({
                         "event":   "error",
