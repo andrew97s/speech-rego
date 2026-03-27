@@ -232,13 +232,12 @@ class _OpenWakeWordDetector:
 class _WhisperWakeWordDetector:
     """
     Wake word detection using the already-loaded Whisper model.
-    Maintains a 1.5 s sliding audio window; when speech energy is
-    detected, runs a quick Whisper inference (beam_size=1) and checks
-    if any configured keyword appears in the output.
+    Maintains a sliding audio window; when speech energy is detected,
+    runs a quick Whisper inference and checks if any keyword appears.
     No additional dependencies required — works with or without vosk.
     """
-    _WINDOW_SEC   = 1.5   # sliding inference window length
-    _COOLDOWN_SEC = 0.4   # min gap between consecutive inferences
+    _WINDOW_SEC   = 2.5   # sliding inference window (more context = better accuracy)
+    _COOLDOWN_SEC = 0.3   # min gap between consecutive inferences
 
     def __init__(self, model, keywords: List[str], language: Optional[str],
                  sample_rate: int = _WHISPER_SAMPLE_RATE):
@@ -250,6 +249,9 @@ class _WhisperWakeWordDetector:
         self._win_bytes = int(self._WINDOW_SEC * sample_rate) * 2  # int16 bytes
         self._buf       = bytearray()
         self._last_infer = 0.0
+        # Use keywords as initial_prompt — strongly biases Whisper towards
+        # transcribing the exact wake word characters (key for Chinese)
+        self._prompt = "、".join(self.keywords)
         logger.info(f"[WakeWord] Whisper mode -- keywords: {self.keywords}")
 
     def process(self, audio_bytes: bytes, rms: float,
@@ -258,10 +260,10 @@ class _WhisperWakeWordDetector:
         if len(self._buf) > self._win_bytes:
             self._buf = self._buf[-self._win_bytes:]
 
-        # Skip if quiet or inference ran too recently
-        if (rms < energy_threshold
+        # Use half the ASR energy threshold so soft wake-word speech isn't gated out
+        if (rms < energy_threshold * 0.5
                 or time.time() - self._last_infer < self._COOLDOWN_SEC
-                or len(self._buf) < self._win_bytes // 3):
+                or len(self._buf) < self._win_bytes // 4):
             return None
 
         self._last_infer = time.time()
@@ -270,16 +272,20 @@ class _WhisperWakeWordDetector:
         try:
             segs, _ = self._model.transcribe(
                 audio_f32,
-                language        = self._language,
-                task            = "transcribe",
-                beam_size       = 1,   # fast enough for wake-word
-                vad_filter      = False,
-                word_timestamps = False,
+                language                 = self._language,
+                task                     = "transcribe",
+                beam_size                = 2,      # +1 beam for better accuracy
+                vad_filter               = False,
+                word_timestamps          = False,
+                initial_prompt           = self._prompt,  # bias towards wake word
+                condition_on_previous_text = False,
             )
             text = "".join(s.text for s in segs).replace(" ", "").lower()
         except Exception:
             return None
 
+        if text:
+            logger.debug(f"[WakeWord] heard: {text!r}")
         for kw, kw_n in zip(self.keywords, self._kw_norm):
             if kw_n in text:
                 self._buf.clear()
