@@ -268,8 +268,8 @@ if ($IncludeOWW) {
 switch ($GPU) {
     "cuda" {
         # nvidia-* packages are NOT on Tsinghua mirror — must use official PyPI.
-        # Install them explicitly before faster-whisper[cuda12] so ctranslate2
-        # can find cublas64_12.dll / cudart64_12.dll in site-packages\nvidia\*\bin\.
+        # Install explicitly so ctranslate2 can find cublas64_12.dll etc.
+        # in site-packages\nvidia\*\bin\ at runtime.
         Write-Info "  安装 CUDA 运行库（从官方 PyPI，约 1-2 GB）..."
         $nvPkgs = @(
             'nvidia-cuda-runtime-cu12',
