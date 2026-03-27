@@ -243,6 +243,14 @@ class SpeechServer:
             ok    = self.engine.update_config(key, value)
             if ok:
                 save_config(self.config)
+                # wake_word config changed: rebuild detector in background
+                # so change takes effect immediately (no restart needed)
+                if key.startswith("wake_word.") and self.engine.state in (
+                    EngineState.STOPPED, EngineState.IDLE
+                ):
+                    loop = self.loop
+                    engine = self.engine
+                    asyncio.create_task(loop.run_in_executor(None, engine.preload))
             await ws.send(json.dumps({
                 "event": "config_updated" if ok else "error",
                 "code":  None if ok else "invalid_key",

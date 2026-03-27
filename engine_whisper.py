@@ -46,9 +46,12 @@ def _has_cjk(text: str) -> bool:
 
 
 def _resolve_mode(mode: str, keywords: List[str]) -> str:
-    if mode != "auto":
-        return mode
-    return "vosk" if any(_has_cjk(kw) for kw in keywords) else "openwakeword"
+    if mode == "auto":
+        return "openwakeword"
+    if mode == "vosk":
+        logger.warning("[WakeWord] vosk mode is no longer supported; using openwakeword")
+        return "openwakeword"
+    return mode
 
 
 def _buffer_to_float32(buf: List[bytes]) -> np.ndarray:
@@ -202,38 +205,7 @@ def _fix_ctranslate2_dlls():
         )
 
 
-# ── Wake word detectors (identical to engine.py) ──────────────────────────────
-
-class _VoskWakeWordDetector:
-    def __init__(self, model, sample_rate: int, keywords: List[str]):
-        self._model       = model
-        self._sample_rate = sample_rate
-        self.keywords     = [kw.strip() for kw in keywords]
-        self._make_rec()
-        logger.info(f"[WakeWord] Vosk mode -- keywords: {self.keywords}")
-
-    @staticmethod
-    def _to_grammar_phrase(kw: str) -> str:
-        """CJK keywords must be space-separated characters for Vosk."""
-        return " ".join(kw) if _has_cjk(kw) else kw
-
-    def _make_rec(self):
-        import vosk
-        phrases = [self._to_grammar_phrase(kw) for kw in self.keywords]
-        grammar = json.dumps(phrases + ["[unk]"], ensure_ascii=False)
-        self._rec = vosk.KaldiRecognizer(self._model, self._sample_rate)
-        self._rec.SetGrammar(grammar)
-
-    def process(self, audio_bytes: bytes) -> Optional[str]:
-        if self._rec.AcceptWaveform(audio_bytes):
-            result     = json.loads(self._rec.Result())
-            text       = result.get("text", "").strip()
-            normalized = text.replace(" ", "")
-            if normalized and normalized != "[unk]" and normalized in self.keywords:
-                self._make_rec()
-                return normalized
-        return None
-
+# ── Wake word detectors ────────────────────────────────────────────────────────
 
 class _OpenWakeWordDetector:
     def __init__(self, keywords: List[str], sensitivity: float):
@@ -372,6 +344,9 @@ class SpeechEngine:
                 cfg = cfg[part]
             cfg[parts[-1]] = value
             logger.info(f"Config updated: {key} = {value!r}")
+            # Invalidate cached wake word detector so it rebuilds on next start
+            if key.startswith("wake_word."):
+                self._ww_key = None
             return True
         except (KeyError, TypeError):
             logger.warning(f"Invalid config key: {key!r}")
@@ -530,22 +505,10 @@ class SpeechEngine:
                     ww_detector = _WhisperWakeWordDetector(
                         asr_model, keywords, language, _WHISPER_SAMPLE_RATE
                     )
-                else:
+                else:  # openwakeword
                     try:
-                        if resolved_mode == "vosk":
-                            import vosk
-                            vosk.SetLogLevel(-1)
-                            ww_model_path = self.config.get("asr", {}).get(
-                                "model_path", "models/vosk-model-small-cn-0.22"
-                            )
-                            logger.info(f"[preload] Loading Vosk model: {ww_model_path}")
-                            vosk_model  = vosk.Model(ww_model_path)
-                            ww_detector = _VoskWakeWordDetector(
-                                vosk_model, _WHISPER_SAMPLE_RATE, keywords
-                            )
-                        else:  # openwakeword
-                            oww_models  = cfg_ww.get("openwakeword_models") or keywords
-                            ww_detector = _OpenWakeWordDetector(oww_models, sensitivity)
+                        oww_models  = cfg_ww.get("openwakeword_models") or keywords
+                        ww_detector = _OpenWakeWordDetector(oww_models, sensitivity)
                     except Exception as exc:
                         logger.warning(
                             f"[preload] Wake word init failed ({exc}); "

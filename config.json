@@ -1,17 +1,13 @@
-﻿{
+{
     "host":  "127.0.0.1",
     "port":  8765,
     "wake_word":  {
                       "enabled":  true,
-                      "mode":  "vosk",
-                      "keywords":  [
-                                       "小智"
-                                   ],
-                      "sensitivity":  0.5,
+                      "mode":  "openwakeword",
                       "openwakeword_models":  ["hey_jarvis"],
-                      "_mode_note":  "auto=自动检测 | vosk=中文自定义词(推荐) | openwakeword=英文预训练 | whisper=Whisper识别(无需额外依赖)",
-                      "_keywords_note":  "vosk/whisper模式可填任意中文词组；openwakeword模式需填有效模型名",
-                      "_openwakeword_models_note":  "openwakeword模式专用，内置模型: hey_jarvis/alexa/hey_mycroft/timer/weather；也可填.onnx文件路径"
+                      "sensitivity":  0.5,
+                      "_mode_note":  "openwakeword=预训练ONNX模型(推荐) | whisper=Whisper识别(无需额外依赖) | auto=同openwakeword",
+                      "_openwakeword_models_note":  "内置模型: hey_jarvis / alexa / hey_mycroft / timer / weather；也可填 .onnx 文件路径"
                   },
     "asr":  {
                 "model_path":  "models/vosk-model-small-cn-0.22",
@@ -33,7 +29,7 @@
                     "initial_prompt":  "以下是普通话，包含中文、数字和英文字母。",
                     "_model_note":  "tiny(最快)|base(推荐)|small|medium|large-v3(最准)",
                     "_language_note":  "null=自动检测中英混杂 | zh=中文(推荐，数字/字母更准) | en=英文",
-                    "_device_note":  "cpu | cuda (需安装 nvidia-cudnn-cu12)",
+                    "_device_note":  "cpu | cuda | dml (DirectML/AMD/Intel)",
                     "_compute_note":  "cpu: int8(推荐) | cuda: float16",
                     "_vad_cooldown_note":  "识别结束后多久才允许下一次VAD触发(ms)",
                     "_vad_min_speech_note":  "VAD模式下需要连续声音多久才开始识别(ms)",

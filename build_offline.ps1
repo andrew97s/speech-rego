@@ -267,8 +267,13 @@ if ($IncludeOWW) {
 # GPU variant of onnxruntime
 switch ($GPU) {
     "cuda" {
-        Write-Info "  安装 CUDA 支持（nvidia-cudnn-cu12，约 740 MB，请耐心等待）..."
-        & $PyExe -m pip install 'nvidia-cudnn-cu12>=8.9' --prefer-binary
+        # faster-whisper[cuda12] bundles ALL required CUDA DLLs (cudart, cublas, cudnn).
+        # Target machine only needs NVIDIA driver >= 527 — no CUDA Toolkit install needed.
+        Write-Info "  重新安装 faster-whisper[cuda12]（含完整 CUDA 运行库，约 1-2 GB，请耐心等待）..."
+        & $PyExe -m pip install 'faster-whisper[cuda12]>=1.0.0' --prefer-binary
+        if ($LASTEXITCODE -ne 0) {
+            Write-Warn "faster-whisper[cuda12] 安装失败，保留 CPU 版本"
+        }
         & $PyExe -m pip uninstall onnxruntime -y --quiet 2>&1 | Out-Null
         Write-Info "  安装 onnxruntime-gpu..."
         & $PyExe -m pip install 'onnxruntime-gpu>=1.17.0' --prefer-binary
