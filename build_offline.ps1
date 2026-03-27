@@ -222,7 +222,7 @@ $pkgs = @(
 
 foreach ($pkg in $pkgs) {
     Write-Info "  pip install $pkg"
-    & $PyExe -m pip install $pkg --quiet
+    & $PyExe -m pip install $pkg --prefer-binary --quiet
     if ($LASTEXITCODE -ne 0) {
         Write-Warn "安装 $pkg 时出错（继续）"
     }
@@ -232,21 +232,21 @@ foreach ($pkg in $pkgs) {
 switch ($GPU) {
     "cuda" {
         Write-Info "  安装 CUDA 支持（nvidia-cudnn-cu12）..."
-        & $PyExe -m pip install 'nvidia-cudnn-cu12>=8.9' --quiet
+        & $PyExe -m pip install 'nvidia-cudnn-cu12>=8.9' --prefer-binary --quiet
         & $PyExe -m pip uninstall onnxruntime -y --quiet 2>&1 | Out-Null
-        & $PyExe -m pip install 'onnxruntime-gpu>=1.17.0' --quiet
+        & $PyExe -m pip install 'onnxruntime-gpu>=1.17.0' --prefer-binary --quiet
         if ($LASTEXITCODE -ne 0) {
             Write-Warn "onnxruntime-gpu install failed, keeping CPU version"
-            & $PyExe -m pip install 'onnxruntime>=1.16.0' --quiet
+            & $PyExe -m pip install 'onnxruntime>=1.16.0' --prefer-binary --quiet
         }
     }
     "dml" {
         Write-Info "  Installing DirectML support..."
         & $PyExe -m pip uninstall onnxruntime -y --quiet 2>&1 | Out-Null
-        & $PyExe -m pip install 'onnxruntime-directml>=1.17.0' --quiet
+        & $PyExe -m pip install 'onnxruntime-directml>=1.17.0' --prefer-binary --quiet
         if ($LASTEXITCODE -ne 0) {
             Write-Warn "onnxruntime-directml install failed, keeping CPU version"
-            & $PyExe -m pip install 'onnxruntime>=1.16.0' --quiet
+            & $PyExe -m pip install 'onnxruntime>=1.16.0' --prefer-binary --quiet
         }
     }
 }
