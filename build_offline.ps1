@@ -45,7 +45,7 @@ param(
     [ValidateSet("none","cuda","dml","auto")]
     [string] $GPU          = "auto",
     [bool]   $IncludeVosk  = $true,
-    [bool]   $IncludeOWW   = $false,   # openwakeword: tflite-runtime 在 Win/Py3.11 无 wheel，默认关闭
+    [bool]   $IncludeOWW   = $true,    # openwakeword 唤醒词（默认启用）
     [string] $OutputDir    = ""
 )
 
@@ -229,25 +229,34 @@ foreach ($pkg in $pkgs) {
     }
 }
 
-# openwakeword 依赖 tflite-runtime，在 Windows Python 3.11 上无预编译 wheel，
-# 会导致 pip 卡死尝试编译源码。使用 --only-binary=:all: 让它快速失败而非挂起。
+# openwakeword: 先尝试 --only-binary（最快，无需编译）；
+# 若失败（microvad 等 native dep 无 wheel），回退 --no-deps 只装核心包，VAD 禁用但唤醒词仍可用。
 if ($IncludeOWW) {
-    Write-Info "  pip install openwakeword>=0.6.0  (--only-binary=:all:)"
-    & $PyExe -m pip install 'openwakeword>=0.6.0' --only-binary=:all: --quiet
-    if ($LASTEXITCODE -ne 0) {
-        Write-Warn "openwakeword 安装失败（无可用 wheel），跳过。唤醒词功能将不可用。"
+    Write-Info "  pip install openwakeword>=0.6.0"
+    & $PyExe -m pip install 'openwakeword>=0.6.0' --only-binary=:all: --quiet 2>&1 | Out-Null
+    if ($LASTEXITCODE -eq 0) {
+        Write-Ok "  openwakeword 安装成功"
+    } else {
+        Write-Warn "  全量安装失败（microvad 无 wheel）→ 回退安装核心包（VAD 禁用，唤醒词仍可用）"
+        & $PyExe -m pip install 'openwakeword>=0.6.0' --no-deps --prefer-binary --quiet
+        # openwakeword 核心运行时依赖（不含 microvad/VAD）
+        & $PyExe -m pip install 'tqdm' 'requests' 'scipy' --prefer-binary --quiet
+        if ($LASTEXITCODE -ne 0) {
+            Write-Warn "  openwakeword 安装失败，唤醒词功能将不可用"
+        }
     }
 } else {
-    Write-Info "  跳过 openwakeword（IncludeOWW=False）。如需唤醒词功能，传入 -IncludeOWW `$true"
+    Write-Info "  跳过 openwakeword（IncludeOWW=False）"
 }
 
 # GPU variant of onnxruntime
 switch ($GPU) {
     "cuda" {
-        Write-Info "  安装 CUDA 支持（nvidia-cudnn-cu12）..."
-        & $PyExe -m pip install 'nvidia-cudnn-cu12>=8.9' --prefer-binary --quiet
+        Write-Info "  安装 CUDA 支持（nvidia-cudnn-cu12，约 740 MB，请耐心等待）..."
+        & $PyExe -m pip install 'nvidia-cudnn-cu12>=8.9' --prefer-binary
         & $PyExe -m pip uninstall onnxruntime -y --quiet 2>&1 | Out-Null
-        & $PyExe -m pip install 'onnxruntime-gpu>=1.17.0' --prefer-binary --quiet
+        Write-Info "  安装 onnxruntime-gpu..."
+        & $PyExe -m pip install 'onnxruntime-gpu>=1.17.0' --prefer-binary
         if ($LASTEXITCODE -ne 0) {
             Write-Warn "onnxruntime-gpu install failed, keeping CPU version"
             & $PyExe -m pip install 'onnxruntime>=1.16.0' --prefer-binary --quiet
@@ -314,11 +323,26 @@ except Exception as e:
     Remove-Item $dlPy -Force -ErrorAction SilentlyContinue
 }
 
-# Copy from persistent cache into the output package
-Write-Info "从缓存复制模型到输出包..."
-if (Test-Path (Join-Path $WModelCacheHF "hub")) {
-    robocopy (Join-Path $WModelCacheHF "hub") (Join-Path $HFCacheDir "hub") /E /NFL /NDL /NJH /NJS /NC /NS /NP | Out-Null
-    Write-Ok "Whisper 模型已复制到 models\hf\"
+# ── 将 Whisper 模型展开到平坦目录（只拷 snapshot，跳过 blobs 重复副本）
+# HF hub 在 Windows 上无法创建符号链接，blobs/ 与 snapshots/ 各存一份完整文件，
+# 只拷 snapshots/<commit>/ 可节省约 50% 空间。
+# faster-whisper 支持直接传目录路径加载模型，无需 HF_HOME。
+$whisperModelDir = Join-Path $ModelsDir "whisper-$WhisperModel"
+$snapshotBase    = Join-Path $WModelCacheHF "hub\$modelKey\snapshots"
+
+if (Test-Path $snapshotBase) {
+    $latestSnap = Get-ChildItem $snapshotBase -Directory |
+                  Sort-Object LastWriteTime -Descending | Select-Object -First 1
+    if ($latestSnap) {
+        New-Item -ItemType Directory -Force -Path $whisperModelDir | Out-Null
+        Write-Info "展开模型文件到 models\whisper-$WhisperModel\ ..."
+        robocopy $latestSnap.FullName $whisperModelDir /E /NFL /NDL /NJH /NJS /NC /NS /NP | Out-Null
+        $modelSizeMB = [int]((Get-ChildItem $whisperModelDir -Recurse -File |
+                               Measure-Object -Property Length -Sum).Sum / 1MB)
+        Write-Ok "Whisper 模型已展开（${modelSizeMB} MB，省去 blobs 重复副本）"
+    } else {
+        Write-Warn "找不到 snapshot 目录，服务首次启动时将自动下载"
+    }
 } else {
     Write-Warn "缓存中未找到模型文件，服务首次启动时将自动下载"
 }
@@ -409,8 +433,8 @@ try {
     if ($IncludeVosk) {
         $cfg.asr.model_path = "models/$CN_MODEL"
     }
-    $cfg.whisper.model  = $WhisperModel
-    # Persist: HF_HOME will be set in start_whisper.bat
+    # Point to flat model directory (no HF hub duplication)
+    $cfg.whisper.model  = "models/whisper-$WhisperModel"
     $cfg | ConvertTo-Json -Depth 10 | Set-Content $cfgOut -Encoding UTF8
     Write-Ok "config.json 路径已更新"
 } catch {
@@ -427,9 +451,9 @@ chcp 65001 >nul
 setlocal
 set PYTHONIOENCODING=utf-8
 set PYTHONUTF8=1
-:: 指向本地 HuggingFace 模型缓存（离线模式）
-set HF_HOME=%~dp0models\hf
-set HF_ENDPOINT=https://hf-mirror.com
+:: 禁止 HuggingFace 联网（模型已展开到 models\whisper-$WhisperModel\）
+set TRANSFORMERS_OFFLINE=1
+set HF_DATASETS_OFFLINE=1
 cd /d "%~dp0"
 title 语音识别服务 (Whisper) - ws://127.0.0.1:8766
 echo.
@@ -473,7 +497,7 @@ chcp 65001 >nul
 setlocal
 set PYTHONIOENCODING=utf-8
 set PYTHONUTF8=1
-set HF_HOME=%~dp0models\hf
+set TRANSFORMERS_OFFLINE=1
 cd /d "%~dp0"
 title 环境检测
 python\python.exe check_env.py
@@ -507,9 +531,9 @@ WebSocket 地址:
   - 麦克风设备
 
 目录说明:
-  python\          Python $PY_VER 嵌入式运行时 + 所有依赖包
-  models\hf\       Whisper $WhisperModel 模型本地缓存
-  models\$CN_MODEL\  Vosk 中文语音模型
+  python\               Python $PY_VER 嵌入式运行时 + 所有依赖包
+  models\whisper-$WhisperModel\  Whisper 模型文件（已展开，直接加载）
+  models\$CN_MODEL\     Vosk 中文语音模型
   config.json      配置文件（可编辑）
   index.html       Web 控制台
 
