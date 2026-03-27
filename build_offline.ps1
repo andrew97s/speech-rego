@@ -148,13 +148,13 @@ Write-Ok "pip 安装成功"
 Write-Step 4 "安装 Python 依赖包（首次约需 5–15 分钟）"
 
 $pkgs = @(
-    "websockets>=12.0",
-    "sounddevice>=0.4.6",
-    "numpy>=1.24.0,<2.0.0",
-    "faster-whisper>=1.0.0",
-    "ctranslate2>=4.0.0",
-    "vosk>=0.3.45",
-    "openwakeword>=0.6.0"
+    'websockets>=12.0',
+    'sounddevice>=0.4.6',
+    'numpy>=1.24.0,<2.0.0',
+    'faster-whisper>=1.0.0',
+    'ctranslate2>=4.0.0',
+    'vosk>=0.3.45',
+    'openwakeword>=0.6.0'
 )
 
 foreach ($pkg in $pkgs) {
@@ -169,21 +169,21 @@ foreach ($pkg in $pkgs) {
 switch ($GPU) {
     "cuda" {
         Write-Info "  安装 CUDA 支持（nvidia-cudnn-cu12）..."
-        & $PyExe -m pip install "nvidia-cudnn-cu12>=8.9" --quiet
+        & $PyExe -m pip install 'nvidia-cudnn-cu12>=8.9' --quiet
         & $PyExe -m pip uninstall onnxruntime -y --quiet 2>&1 | Out-Null
-        & $PyExe -m pip install "onnxruntime-gpu>=1.17.0" --quiet
+        & $PyExe -m pip install 'onnxruntime-gpu>=1.17.0' --quiet
         if ($LASTEXITCODE -ne 0) {
-            Write-Warn "onnxruntime-gpu 安装失败，保留 CPU 版本"
-            & $PyExe -m pip install "onnxruntime>=1.16.0" --quiet
+            Write-Warn "onnxruntime-gpu install failed, keeping CPU version"
+            & $PyExe -m pip install 'onnxruntime>=1.16.0' --quiet
         }
     }
     "dml" {
-        Write-Info "  安装 DirectML 支持..."
+        Write-Info "  Installing DirectML support..."
         & $PyExe -m pip uninstall onnxruntime -y --quiet 2>&1 | Out-Null
-        & $PyExe -m pip install "onnxruntime-directml>=1.17.0" --quiet
+        & $PyExe -m pip install 'onnxruntime-directml>=1.17.0' --quiet
         if ($LASTEXITCODE -ne 0) {
-            Write-Warn "onnxruntime-directml 安装失败，保留 CPU 版本"
-            & $PyExe -m pip install "onnxruntime>=1.16.0" --quiet
+            Write-Warn "onnxruntime-directml install failed, keeping CPU version"
+            & $PyExe -m pip install 'onnxruntime>=1.16.0' --quiet
         }
     }
 }
@@ -196,24 +196,40 @@ Write-Info "缓存目录: $HFCacheDir"
 $env:HF_HOME     = $HFCacheDir
 $env:HF_ENDPOINT = $HF_MIRROR
 
-$dlScript = @"
+# Write Python download script to a temp file to avoid heredoc parsing issues
+$dlPy = Join-Path $env:TEMP "wh_dl_$PID.py"
+# Use single-quote heredoc: PS won't expand anything inside @'...'@
+# Placeholders __HFDIR__, __HFEP__, __MODEL__ are substituted below
+@'
 import os, sys
-os.environ['HF_HOME']     = r'$($HFCacheDir -replace "\\","\\")'
-os.environ['HF_ENDPOINT'] = '$HF_MIRROR'
-sys.stdout.reconfigure(encoding='utf-8')
+os.environ["HF_HOME"]     = "__HFDIR__"
+os.environ["HF_ENDPOINT"] = "__HFEP__"
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
 try:
     from faster_whisper import WhisperModel
-    print('  正在下载/验证 Whisper $WhisperModel 模型 ...')
-    m = WhisperModel('$WhisperModel', device='cpu', compute_type='int8')
-    print('  Whisper 模型下载完成。')
+    print("  Downloading / verifying Whisper model __MODEL__ ...")
+    m = WhisperModel("__MODEL__", device="cpu", compute_type="int8")
+    print("  Whisper model ready.")
     del m
 except Exception as e:
-    print(f'  [警告] {e}', file=sys.stderr)
-    print('  模型将在首次启动服务时自动下载。')
-"@
+    print("  [warn] " + str(e), file=sys.stderr)
+    print("  Model will be downloaded automatically on first service start.")
+'@ | Set-Content $dlPy -Encoding UTF8
 
-& $PyExe -c $dlScript
-Write-Ok "Whisper 模型准备完成"
+# Substitute placeholders (escape backslashes for Python raw string)
+$hfEscaped = $HFCacheDir -replace '\\', '\\\\'
+(Get-Content $dlPy -Raw -Encoding UTF8) `
+    -replace '__HFDIR__', $hfEscaped `
+    -replace '__HFEP__',  $HF_MIRROR `
+    -replace '__MODEL__', $WhisperModel |
+    Set-Content $dlPy -Encoding UTF8
+
+& $PyExe $dlPy
+Remove-Item $dlPy -Force -ErrorAction SilentlyContinue
+Write-Ok "Whisper model ready"
 
 # ── STEP 6: Vosk model ─────────────────────────────────────────────────────────
 if ($IncludeVosk) {
@@ -246,15 +262,19 @@ if ($IncludeVosk) {
     }
 
     # Pre-fetch openwakeword built-in models
-    Write-Info "预下载 openwakeword 内置模型..."
-    & $PyExe -c @"
-import warnings; warnings.filterwarnings('ignore')
+    Write-Info "Pre-downloading openwakeword models..."
+    $owwPy = Join-Path $env:TEMP "oww_dl_$PID.py"
+    @'
+import warnings; warnings.filterwarnings("ignore")
 try:
-    import openwakeword; openwakeword.utils.download_models()
-    print('  openwakeword 模型已就绪。')
+    import openwakeword
+    openwakeword.utils.download_models()
+    print("  openwakeword models ready.")
 except Exception as e:
-    print(f'  [跳过] {e}')
-"@ 2>$null
+    print("  [skip] " + str(e))
+'@ | Set-Content $owwPy -Encoding UTF8
+    & $PyExe $owwPy 2>$null
+    Remove-Item $owwPy -Force -ErrorAction SilentlyContinue
 } else {
     Write-Step 6 "跳过 Vosk 模型（IncludeVosk=False）"
 }
