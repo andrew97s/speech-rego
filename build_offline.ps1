@@ -115,6 +115,12 @@ if (-not $OutputDir) {
     $OutputDir = Join-Path $ScriptDir "dist\SpeechReco-Offline"
 }
 
+# Persistent model cache — lives next to the script, NEVER deleted on rebuild.
+# Re-running the build reuses cached models (no re-download).
+$CacheDir      = Join-Path $ScriptDir ".offline-cache"
+$WModelCacheHF = Join-Path $CacheDir "hf"        # HuggingFace / Whisper cache
+$VoskCacheDir  = Join-Path $CacheDir "vosk"       # Vosk model cache
+
 $PY_VER     = "3.11.9"
 $PY_ZIP     = "python-$PY_VER-embed-amd64.zip"
 $PY_URL     = "https://www.python.org/ftp/python/$PY_VER/$PY_ZIP"
@@ -135,6 +141,7 @@ Write-Host $border -ForegroundColor Cyan
 Write-Host "  离线部署包构建器  /  Offline Deployment Builder" -ForegroundColor Cyan
 Write-Host $border -ForegroundColor Cyan
 Write-Host "  输出目录      : $OutputDir"
+Write-Host "  模型缓存      : $CacheDir"
 Write-Host "  Whisper 模型  : $WhisperModel"
 Write-Host "  GPU 模式      : $GPU"
 Write-Host "  包含 Vosk     : $IncludeVosk"
@@ -142,6 +149,12 @@ Write-Host $border -ForegroundColor Cyan
 
 # ── STEP 1: Output directory ───────────────────────────────────────────────────
 Write-Step 1 "准备输出目录"
+
+# Ensure persistent cache dirs exist (never removed)
+foreach ($d in @($CacheDir, $WModelCacheHF, $VoskCacheDir)) {
+    New-Item -ItemType Directory -Force -Path $d | Out-Null
+}
+
 if (Test-Path $OutputDir) {
     $ans = Read-Host "  '$OutputDir' 已存在，是否覆盖重建? [y/N]"
     if ($ans -notmatch "^[yY]") { Write-Host "已取消。"; exit 0 }
@@ -150,7 +163,7 @@ if (Test-Path $OutputDir) {
 foreach ($d in @($OutputDir, $PythonDir, $ModelsDir, $HFCacheDir)) {
     New-Item -ItemType Directory -Force -Path $d | Out-Null
 }
-Write-Ok "目录创建完成"
+Write-Ok "目录创建完成（模型缓存: $CacheDir）"
 
 # ── STEP 2: Python 3.11 embeddable ────────────────────────────────────────────
 Write-Step 2 "下载 Python $PY_VER 嵌入式运行环境"
@@ -240,17 +253,25 @@ switch ($GPU) {
 Write-Ok "Python 依赖包安装完成"
 
 # ── STEP 5: Whisper model ──────────────────────────────────────────────────────
-Write-Step 5 "下载 Whisper 模型（$WhisperModel）到本地缓存"
-Write-Info "缓存目录: $HFCacheDir"
+Write-Step 5 "下载 Whisper 模型（$WhisperModel）"
+Write-Info "持久缓存目录: $WModelCacheHF"
 
-$env:HF_HOME     = $HFCacheDir
-$env:HF_ENDPOINT = $HF_MIRROR
+# Check whether this model is already cached (HF hub structure)
+$modelKey  = "models--Systran--faster-whisper-$WhisperModel"
+$modelSnap = Join-Path $WModelCacheHF "hub\$modelKey\snapshots"
+$alreadyCached = (Test-Path $modelSnap) -and ((Get-ChildItem $modelSnap -ErrorAction SilentlyContinue).Count -gt 0)
 
-# Write Python download script to a temp file to avoid heredoc parsing issues
-$dlPy = Join-Path $env:TEMP "wh_dl_$PID.py"
-# Use single-quote heredoc: PS won't expand anything inside @'...'@
-# Placeholders __HFDIR__, __HFEP__, __MODEL__ are substituted below
-@'
+if ($alreadyCached) {
+    Write-Ok "Whisper 模型已在缓存中，跳过下载：$modelKey"
+} else {
+    Write-Info "缓存未命中，开始下载（首次约需几分钟）..."
+
+    $env:HF_HOME     = $WModelCacheHF
+    $env:HF_ENDPOINT = $HF_MIRROR
+
+    # Write Python download script to a temp file to avoid heredoc parsing issues
+    $dlPy = Join-Path $env:TEMP "wh_dl_$PID.py"
+    @'
 import os, sys
 os.environ["HF_HOME"]     = "__HFDIR__"
 os.environ["HF_ENDPOINT"] = "__HFEP__"
@@ -260,7 +281,7 @@ except Exception:
     pass
 try:
     from faster_whisper import WhisperModel
-    print("  Downloading / verifying Whisper model __MODEL__ ...")
+    print("  Downloading Whisper model __MODEL__ ...")
     m = WhisperModel("__MODEL__", device="cpu", compute_type="int8")
     print("  Whisper model ready.")
     del m
@@ -269,28 +290,38 @@ except Exception as e:
     print("  Model will be downloaded automatically on first service start.")
 '@ | Set-Content $dlPy -Encoding UTF8
 
-# Substitute placeholders (escape backslashes for Python raw string)
-$hfEscaped = $HFCacheDir -replace '\\', '\\\\'
-(Get-Content $dlPy -Raw -Encoding UTF8) `
-    -replace '__HFDIR__', $hfEscaped `
-    -replace '__HFEP__',  $HF_MIRROR `
-    -replace '__MODEL__', $WhisperModel |
-    Set-Content $dlPy -Encoding UTF8
+    $hfEscaped = $WModelCacheHF -replace '\\', '\\\\'
+    (Get-Content $dlPy -Raw -Encoding UTF8) `
+        -replace '__HFDIR__', $hfEscaped `
+        -replace '__HFEP__',  $HF_MIRROR `
+        -replace '__MODEL__', $WhisperModel |
+        Set-Content $dlPy -Encoding UTF8
 
-& $PyExe $dlPy
-Remove-Item $dlPy -Force -ErrorAction SilentlyContinue
-Write-Ok "Whisper model ready"
+    & $PyExe $dlPy
+    Remove-Item $dlPy -Force -ErrorAction SilentlyContinue
+}
+
+# Copy from persistent cache into the output package
+Write-Info "从缓存复制模型到输出包..."
+if (Test-Path (Join-Path $WModelCacheHF "hub")) {
+    robocopy (Join-Path $WModelCacheHF "hub") (Join-Path $HFCacheDir "hub") /E /NFL /NDL /NJH /NJS /NC /NS /NP | Out-Null
+    Write-Ok "Whisper 模型已复制到 models\hf\"
+} else {
+    Write-Warn "缓存中未找到模型文件，服务首次启动时将自动下载"
+}
 
 # ── STEP 6: Vosk model ─────────────────────────────────────────────────────────
 if ($IncludeVosk) {
     Write-Step 6 "下载 Vosk 中文模型（$CN_MODEL）"
-    $voskDest = Join-Path $ModelsDir $CN_MODEL
-    $voskZip  = Join-Path $ModelsDir "$CN_MODEL.zip"
 
-    if (Test-Path $voskDest) {
-        Write-Ok "模型已存在：$CN_MODEL"
+    $voskCached = Join-Path $VoskCacheDir $CN_MODEL   # persistent cache location
+    $voskDest   = Join-Path $ModelsDir $CN_MODEL      # output package location
+    $voskZip    = Join-Path $VoskCacheDir "$CN_MODEL.zip"
+
+    if (Test-Path $voskCached) {
+        Write-Ok "Vosk 模型已在缓存中，跳过下载：$CN_MODEL"
     } else {
-        Write-Info "下载 $CN_URL ..."
+        Write-Info "缓存未命中，开始下载 $CN_URL ..."
         $ok = $true
         try {
             if (Get-Command curl.exe -ErrorAction SilentlyContinue) {
@@ -302,13 +333,20 @@ if ($IncludeVosk) {
         } catch { $ok = $false; Write-Warn "下载失败：$_" }
 
         if ($ok -and (Test-Path $voskZip)) {
-            Write-Info "解压..."
-            Expand-Archive -Path $voskZip -DestinationPath $ModelsDir -Force
+            Write-Info "解压到缓存..."
+            Expand-Archive -Path $voskZip -DestinationPath $VoskCacheDir -Force
             Remove-Item $voskZip -Force
-            Write-Ok "Vosk 中文模型就绪"
+            Write-Ok "Vosk 中文模型已缓存"
         } else {
             Write-Warn "Vosk 模型下载失败。可手动下载后放入 models\ 目录。"
         }
+    }
+
+    # Copy from persistent cache into output package
+    if (Test-Path $voskCached) {
+        Write-Info "从缓存复制 Vosk 模型到输出包..."
+        robocopy $voskCached $voskDest /E /NFL /NDL /NJH /NJS /NC /NS /NP | Out-Null
+        Write-Ok "Vosk 中文模型已复制到 models\$CN_MODEL\"
     }
 
     # Pre-fetch openwakeword built-in models
