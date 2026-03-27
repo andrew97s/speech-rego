@@ -124,49 +124,54 @@ def _fix_ctranslate2_dlls():
     """
     import sys, os, re, types, importlib.util
 
-    # ── Step 1 & 2: add DLL directories (Windows only) ───────────────
-    # os.add_dll_directory() returns a context object that MUST be kept
-    # alive — if discarded, the GC removes the dir from the search path.
-    # Store all handles in a module-level list so they live forever.
+    # ── Step 1 & 2: register CUDA DLL directories ─────────────────────
+    # ctranslate2 loads CUDA libs via LoadLibraryEx which may not respect
+    # os.add_dll_directory(). The most reliable fix on Windows is to
+    # prepend the directories to PATH so every DLL loader can find them.
+    # We also call os.add_dll_directory() as a belt-and-suspenders measure.
     if not hasattr(_fix_ctranslate2_dlls, "_dll_handles"):
         _fix_ctranslate2_dlls._dll_handles = []
 
     def _add_dll(path):
-        try:
-            h = os.add_dll_directory(path)
-            _fix_ctranslate2_dlls._dll_handles.append(h)
-            logger.debug(f"[DLL] added {path}")
-        except OSError:
-            pass
+        # 1. Prepend to PATH (works with all Windows DLL loaders)
+        current_path = os.environ.get("PATH", "")
+        if path not in current_path:
+            os.environ["PATH"] = path + os.pathsep + current_path
+        # 2. Also register via add_dll_directory (keep handle alive)
+        if hasattr(os, "add_dll_directory"):
+            try:
+                h = os.add_dll_directory(path)
+                _fix_ctranslate2_dlls._dll_handles.append(h)
+            except OSError:
+                pass
+        logger.debug(f"[DLL] registered {path}")
 
-    if hasattr(os, "add_dll_directory"):
-        # ctranslate2 package dir
-        spec = importlib.util.find_spec("ctranslate2")
-        if spec and spec.submodule_search_locations:
-            ct2_dir = str(list(spec.submodule_search_locations)[0])
-            _add_dll(ct2_dir)
+    # ctranslate2 package dir
+    spec = importlib.util.find_spec("ctranslate2")
+    if spec and spec.submodule_search_locations:
+        ct2_dir = str(list(spec.submodule_search_locations)[0])
+        _add_dll(ct2_dir)
 
-        # nvidia pip packages install CUDA DLLs into
-        # site-packages/nvidia/<pkg>/bin/  (e.g. cublas64_12.dll)
-        import site
-        _nvidia_dirs_added = 0
-        for sp in site.getsitepackages():
-            nvidia_root = os.path.join(sp, "nvidia")
-            if not os.path.isdir(nvidia_root):
+    # nvidia pip packages: site-packages/nvidia/<pkg>/bin/
+    import site
+    _nvidia_dirs_added = 0
+    for sp in site.getsitepackages():
+        nvidia_root = os.path.join(sp, "nvidia")
+        if not os.path.isdir(nvidia_root):
+            continue
+        for entry in os.scandir(nvidia_root):
+            if not entry.is_dir():
                 continue
-            for entry in os.scandir(nvidia_root):
-                if not entry.is_dir():
-                    continue
-                bin_dir = os.path.join(entry.path, "bin")
-                if os.path.isdir(bin_dir):
-                    _add_dll(bin_dir)
-                    _nvidia_dirs_added += 1
-        if _nvidia_dirs_added == 0:
-            logger.warning(
-                "[DLL] site-packages/nvidia/ not found — CUDA DLLs not bundled. "
-                "CUDA mode needs CUDA Toolkit installed on this machine, "
-                "or re-run build_offline.ps1 -GPU cuda to bundle them."
-            )
+            bin_dir = os.path.join(entry.path, "bin")
+            if os.path.isdir(bin_dir):
+                _add_dll(bin_dir)
+                _nvidia_dirs_added += 1
+    if _nvidia_dirs_added == 0:
+        logger.warning(
+            "[DLL] site-packages/nvidia/ not found — CUDA DLLs not bundled. "
+            "CUDA mode needs CUDA Toolkit installed on this machine, "
+            "or re-run build_offline.ps1 -GPU cuda to bundle them."
+        )
 
     # ── Step 2: evict broken cached module ────────────────────────
     ct2 = sys.modules.get("ctranslate2")
