@@ -45,6 +45,7 @@ param(
     [ValidateSet("none","cuda","dml","auto")]
     [string] $GPU          = "auto",
     [bool]   $IncludeVosk  = $true,
+    [bool]   $IncludeOWW   = $false,   # openwakeword: tflite-runtime 在 Win/Py3.11 无 wheel，默认关闭
     [string] $OutputDir    = ""
 )
 
@@ -145,6 +146,7 @@ Write-Host "  模型缓存      : $CacheDir"
 Write-Host "  Whisper 模型  : $WhisperModel"
 Write-Host "  GPU 模式      : $GPU"
 Write-Host "  包含 Vosk     : $IncludeVosk"
+Write-Host "  包含 OWW      : $IncludeOWW"
 Write-Host $border -ForegroundColor Cyan
 
 # ── STEP 1: Output directory ───────────────────────────────────────────────────
@@ -216,8 +218,7 @@ $pkgs = @(
     'numpy>=1.24.0,<2.0.0',
     'faster-whisper>=1.0.0',
     'ctranslate2>=4.0.0',
-    'vosk>=0.3.45',
-    'openwakeword>=0.6.0'
+    'vosk>=0.3.45'
 )
 
 foreach ($pkg in $pkgs) {
@@ -226,6 +227,18 @@ foreach ($pkg in $pkgs) {
     if ($LASTEXITCODE -ne 0) {
         Write-Warn "安装 $pkg 时出错（继续）"
     }
+}
+
+# openwakeword 依赖 tflite-runtime，在 Windows Python 3.11 上无预编译 wheel，
+# 会导致 pip 卡死尝试编译源码。使用 --only-binary=:all: 让它快速失败而非挂起。
+if ($IncludeOWW) {
+    Write-Info "  pip install openwakeword>=0.6.0  (--only-binary=:all:)"
+    & $PyExe -m pip install 'openwakeword>=0.6.0' --only-binary=:all: --quiet
+    if ($LASTEXITCODE -ne 0) {
+        Write-Warn "openwakeword 安装失败（无可用 wheel），跳过。唤醒词功能将不可用。"
+    }
+} else {
+    Write-Info "  跳过 openwakeword（IncludeOWW=False）。如需唤醒词功能，传入 -IncludeOWW `$true"
 }
 
 # GPU variant of onnxruntime
@@ -349,10 +362,11 @@ if ($IncludeVosk) {
         Write-Ok "Vosk 中文模型已复制到 models\$CN_MODEL\"
     }
 
-    # Pre-fetch openwakeword built-in models
-    Write-Info "Pre-downloading openwakeword models..."
-    $owwPy = Join-Path $env:TEMP "oww_dl_$PID.py"
-    @'
+    # Pre-fetch openwakeword built-in models (only if OWW was installed)
+    if ($IncludeOWW) {
+        Write-Info "Pre-downloading openwakeword models..."
+        $owwPy = Join-Path $env:TEMP "oww_dl_$PID.py"
+        @'
 import warnings; warnings.filterwarnings("ignore")
 try:
     import openwakeword
@@ -361,8 +375,9 @@ try:
 except Exception as e:
     print("  [skip] " + str(e))
 '@ | Set-Content $owwPy -Encoding UTF8
-    & $PyExe $owwPy 2>$null
-    Remove-Item $owwPy -Force -ErrorAction SilentlyContinue
+        & $PyExe $owwPy 2>$null
+        Remove-Item $owwPy -Force -ErrorAction SilentlyContinue
+    }
 } else {
     Write-Step 6 "跳过 Vosk 模型（IncludeVosk=False）"
 }
