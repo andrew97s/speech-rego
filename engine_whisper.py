@@ -125,15 +125,26 @@ def _fix_ctranslate2_dlls():
     import sys, os, re, types, importlib.util
 
     # ── Step 1 & 2: add DLL directories (Windows only) ───────────────
+    # os.add_dll_directory() returns a context object that MUST be kept
+    # alive — if discarded, the GC removes the dir from the search path.
+    # Store all handles in a module-level list so they live forever.
+    if not hasattr(_fix_ctranslate2_dlls, "_dll_handles"):
+        _fix_ctranslate2_dlls._dll_handles = []
+
+    def _add_dll(path):
+        try:
+            h = os.add_dll_directory(path)
+            _fix_ctranslate2_dlls._dll_handles.append(h)
+            logger.debug(f"[DLL] added {path}")
+        except OSError:
+            pass
+
     if hasattr(os, "add_dll_directory"):
         # ctranslate2 package dir
         spec = importlib.util.find_spec("ctranslate2")
         if spec and spec.submodule_search_locations:
             ct2_dir = str(list(spec.submodule_search_locations)[0])
-            try:
-                os.add_dll_directory(ct2_dir)
-            except OSError:
-                pass
+            _add_dll(ct2_dir)
 
         # nvidia pip packages install CUDA DLLs into
         # site-packages/nvidia/<pkg>/bin/  (e.g. cublas64_12.dll)
@@ -148,12 +159,8 @@ def _fix_ctranslate2_dlls():
                     continue
                 bin_dir = os.path.join(entry.path, "bin")
                 if os.path.isdir(bin_dir):
-                    try:
-                        os.add_dll_directory(bin_dir)
-                        logger.debug(f"[DLL] added {bin_dir}")
-                        _nvidia_dirs_added += 1
-                    except OSError:
-                        pass
+                    _add_dll(bin_dir)
+                    _nvidia_dirs_added += 1
         if _nvidia_dirs_added == 0:
             logger.warning(
                 "[DLL] site-packages/nvidia/ not found — CUDA DLLs not bundled. "
