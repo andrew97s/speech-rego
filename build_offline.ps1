@@ -159,7 +159,10 @@ foreach ($d in @($CacheDir, $WModelCacheHF, $VoskCacheDir, $OWWCacheDir, $PipCac
     New-Item -ItemType Directory -Force -Path $d | Out-Null
 }
 # pip respects PIP_CACHE_DIR automatically — all pip install calls use the cache
-$env:PIP_CACHE_DIR = $PipCacheDir
+$env:PIP_CACHE_DIR   = $PipCacheDir
+# 国内 PyPI 镜像，大幅提升下载速度
+$env:PIP_INDEX_URL   = "https://pypi.tuna.tsinghua.edu.cn/simple"
+$env:PIP_TRUSTED_HOST = "pypi.tuna.tsinghua.edu.cn"
 
 if (Test-Path $OutputDir) {
     $ans = Read-Host "  '$OutputDir' 已存在，是否覆盖重建? [y/N]"
