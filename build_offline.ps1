@@ -238,7 +238,7 @@ $pkgs = @(
 
 foreach ($pkg in $pkgs) {
     Write-Info "  pip install $pkg"
-    & $PyExe -m pip install $pkg --prefer-binary --quiet
+    & $PyExe -m pip install $pkg --prefer-binary
     if ($LASTEXITCODE -ne 0) {
         Write-Warn "安装 $pkg 时出错（继续）"
     }
@@ -248,7 +248,7 @@ foreach ($pkg in $pkgs) {
 # 若失败（microvad 等 native dep 无 wheel），回退 --no-deps 只装核心包，VAD 禁用但唤醒词仍可用。
 if ($IncludeOWW) {
     Write-Info "  pip install openwakeword>=0.6.0"
-    & $PyExe -m pip install 'openwakeword>=0.6.0' --only-binary=:all: --quiet 2>&1 | Out-Null
+    & $PyExe -m pip install 'openwakeword>=0.6.0' --only-binary=:all: 2>&1 | Out-Null
     if ($LASTEXITCODE -eq 0) {
         Write-Ok "  openwakeword 安装成功"
     } else {
@@ -374,7 +374,7 @@ if ($IncludeVosk) {
     $voskCached = Join-Path $VoskCacheDir $CN_MODEL   # persistent cache location
     $voskDest   = Join-Path $ModelsDir $CN_MODEL      # output package location
     $voskZip    = Join-Path $VoskCacheDir "$CN_MODEL.zip"
-
+       Write-Ok "Vosk 模型缓存：$voskCached"
     if (Test-Path $voskCached) {
         Write-Ok "Vosk 模型已在缓存中，跳过下载：$CN_MODEL"
     } else {
