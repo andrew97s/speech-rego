@@ -5,9 +5,10 @@ ASR backend: faster-whisper (CTranslate2), supports mixed Chinese/English
              with language=None (auto-detect per session).
 
 Wake word detection:
-  openwakeword -- pre-trained ONNX models (English only: hey_jarvis, alexa, …)
-  whisper      -- Whisper-based keyword spotting (supports Chinese keywords)
-  auto         -- same as openwakeword
+  vosk         -- Vosk grammar/keyword-spotting (Chinese custom keywords)
+  openwakeword -- pre-trained ONNX models (English: hey_jarvis, alexa, …)
+  whisper      -- Whisper-based keyword spotting (any language, no extra deps)
+  auto         -- CJK keywords → vosk; ASCII keywords → openwakeword
 
 State machine:
   STOPPED -> start() -> NO_DEVICE (no mic) or IDLE (mic ok)
@@ -48,11 +49,9 @@ def _has_cjk(text: str) -> bool:
 
 def _resolve_mode(mode: str, keywords: List[str]) -> str:
     if mode == "auto":
-        return "openwakeword"
-    if mode == "vosk":
-        logger.warning("[WakeWord] vosk mode is no longer supported; using openwakeword")
-        return "openwakeword"
-    return mode
+        # Chinese keywords → vosk; ASCII-only → openwakeword
+        return "vosk" if any(_has_cjk(kw) for kw in keywords) else "openwakeword"
+    return mode  # vosk / openwakeword / whisper passed through as-is
 
 
 def _buffer_to_float32(buf: List[bytes]) -> np.ndarray:
@@ -208,6 +207,36 @@ def _fix_ctranslate2_dlls():
 
 # ── Wake word detectors ────────────────────────────────────────────────────────
 
+class _VoskWakeWordDetector:
+    def __init__(self, model, sample_rate: int, keywords: List[str]):
+        self._model       = model
+        self._sample_rate = sample_rate
+        self.keywords     = [kw.strip() for kw in keywords]
+        self._make_rec()
+        logger.info(f"[WakeWord] Vosk mode -- keywords: {self.keywords}")
+
+    @staticmethod
+    def _to_grammar_phrase(kw: str) -> str:
+        return " ".join(kw) if _has_cjk(kw) else kw
+
+    def _make_rec(self):
+        import vosk
+        phrases = [self._to_grammar_phrase(kw) for kw in self.keywords]
+        grammar = json.dumps(phrases + ["[unk]"], ensure_ascii=False)
+        self._rec = vosk.KaldiRecognizer(self._model, self._sample_rate)
+        self._rec.SetGrammar(grammar)
+
+    def process(self, audio_bytes: bytes) -> Optional[str]:
+        if self._rec.AcceptWaveform(audio_bytes):
+            result     = json.loads(self._rec.Result())
+            text       = result.get("text", "").strip()
+            normalized = text.replace(" ", "")
+            if normalized and normalized != "[unk]" and normalized in self.keywords:
+                self._make_rec()
+                return normalized
+        return None
+
+
 class _OpenWakeWordDetector:
     def __init__(self, keywords: List[str], sensitivity: float):
         from openwakeword.model import Model   # type: ignore
@@ -223,8 +252,11 @@ class _OpenWakeWordDetector:
     def process(self, audio_f32: np.ndarray) -> Optional[str]:
         scores: dict = self._model.predict(audio_f32)
         for key in self._score_keys:
-            if float(scores.get(key, 0.0)) >= self.sensitivity:
-                # Return a friendly name (filename without extension)
+            score = float(scores.get(key, 0.0))
+            if score > 0.1:   # only log non-trivial scores to avoid spam
+                name = os.path.splitext(os.path.basename(key))[0]
+                logger.debug(f"[WakeWord/OWW] {name} score={score:.3f} (threshold={self.sensitivity})")
+            if score >= self.sensitivity:
                 return os.path.splitext(os.path.basename(key))[0]
         return None
 
@@ -517,10 +549,22 @@ class SpeechEngine:
                     ww_detector = _WhisperWakeWordDetector(
                         asr_model, keywords, language, _WHISPER_SAMPLE_RATE
                     )
-                else:  # openwakeword
+                else:
                     try:
-                        oww_models  = cfg_ww.get("openwakeword_models") or keywords
-                        ww_detector = _OpenWakeWordDetector(oww_models, sensitivity)
+                        if resolved_mode == "vosk":
+                            import vosk
+                            vosk.SetLogLevel(-1)
+                            ww_model_path = self.config.get("asr", {}).get(
+                                "model_path", "models/vosk-model-small-cn-0.22"
+                            )
+                            logger.info(f"[preload] Loading Vosk model: {ww_model_path}")
+                            vosk_model  = vosk.Model(ww_model_path)
+                            ww_detector = _VoskWakeWordDetector(
+                                vosk_model, _WHISPER_SAMPLE_RATE, keywords
+                            )
+                        else:  # openwakeword
+                            oww_models  = cfg_ww.get("openwakeword_models") or keywords
+                            ww_detector = _OpenWakeWordDetector(oww_models, sensitivity)
                     except Exception as exc:
                         logger.warning(
                             f"[preload] Wake word init failed ({exc}); "
