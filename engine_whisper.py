@@ -138,6 +138,7 @@ def _fix_ctranslate2_dlls():
         # nvidia pip packages install CUDA DLLs into
         # site-packages/nvidia/<pkg>/bin/  (e.g. cublas64_12.dll)
         import site
+        _nvidia_dirs_added = 0
         for sp in site.getsitepackages():
             nvidia_root = os.path.join(sp, "nvidia")
             if not os.path.isdir(nvidia_root):
@@ -150,8 +151,15 @@ def _fix_ctranslate2_dlls():
                     try:
                         os.add_dll_directory(bin_dir)
                         logger.debug(f"[DLL] added {bin_dir}")
+                        _nvidia_dirs_added += 1
                     except OSError:
                         pass
+        if _nvidia_dirs_added == 0:
+            logger.warning(
+                "[DLL] site-packages/nvidia/ not found — CUDA DLLs not bundled. "
+                "CUDA mode needs CUDA Toolkit installed on this machine, "
+                "or re-run build_offline.ps1 -GPU cuda to bundle them."
+            )
 
     # ── Step 2: evict broken cached module ────────────────────────
     ct2 = sys.modules.get("ctranslate2")

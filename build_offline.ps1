@@ -267,12 +267,28 @@ if ($IncludeOWW) {
 # GPU variant of onnxruntime
 switch ($GPU) {
     "cuda" {
-        # faster-whisper[cuda12] bundles ALL required CUDA DLLs (cudart, cublas, cudnn).
-        # Target machine only needs NVIDIA driver >= 527 — no CUDA Toolkit install needed.
-        Write-Info "  重新安装 faster-whisper[cuda12]（含完整 CUDA 运行库，约 1-2 GB，请耐心等待）..."
-        & $PyExe -m pip install 'faster-whisper[cuda12]>=1.0.0' --prefer-binary
-        if ($LASTEXITCODE -ne 0) {
-            Write-Warn "faster-whisper[cuda12] 安装失败，保留 CPU 版本"
+        # nvidia-* packages are NOT on Tsinghua mirror — must use official PyPI.
+        # Install them explicitly before faster-whisper[cuda12] so ctranslate2
+        # can find cublas64_12.dll / cudart64_12.dll in site-packages\nvidia\*\bin\.
+        Write-Info "  安装 CUDA 运行库（从官方 PyPI，约 1-2 GB）..."
+        $nvPkgs = @(
+            'nvidia-cuda-runtime-cu12',
+            'nvidia-cublas-cu12',
+            'nvidia-cudnn-cu12'
+        )
+        foreach ($nvp in $nvPkgs) {
+            Write-Info "    pip install $nvp"
+            & $PyExe -m pip install $nvp --prefer-binary `
+                --index-url https://pypi.org/simple --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
+            if ($LASTEXITCODE -ne 0) { Write-Warn "    $nvp 安装失败" }
+        }
+        # Verify DLLs landed in site-packages\nvidia\
+        $nvDir = Join-Path $PythonDir "Lib\site-packages\nvidia"
+        if (Test-Path $nvDir) {
+            $dlls = @(Get-ChildItem $nvDir -Recurse -Filter "*.dll" -ErrorAction SilentlyContinue)
+            Write-Ok "  CUDA DLL 已打包：$($dlls.Count) 个文件"
+        } else {
+            Write-Warn "  site-packages\nvidia\ 不存在，CUDA 模式可能需要目标机器自行安装 CUDA Toolkit"
         }
         & $PyExe -m pip uninstall onnxruntime -y --quiet 2>&1 | Out-Null
         Write-Info "  安装 onnxruntime-gpu..."
