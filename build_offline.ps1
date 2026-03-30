@@ -359,25 +359,35 @@ except Exception as e:
     Remove-Item $dlPy -Force -ErrorAction SilentlyContinue
 }
 
-# ── 将 Whisper 模型展开到平坦目录（只拷 snapshot，跳过 blobs 重复副本）
-# HF hub 在 Windows 上无法创建符号链接，blobs/ 与 snapshots/ 各存一份完整文件，
-# 只拷 snapshots/<commit>/ 可节省约 50% 空间。
-# faster-whisper 支持直接传目录路径加载模型，无需 HF_HOME。
-$whisperModelDir = Join-Path $ModelsDir "whisper-$WhisperModel"
-$snapshotBase    = Join-Path $WModelCacheHF "hub\$modelKey\snapshots"
+# ── 将 Whisper 模型以 HF hub 缓存结构打包进 models\hf\
+# 方案：只复制 snapshot 文件（不含 blobs 重复副本），同时生成最小化的
+# HF hub 目录结构（refs/main + snapshots/<hash>/），让 faster-whisper
+# 通过 HF_HOME 直接定位模型，无需任何路径魔法。
+$hfPackDir    = Join-Path $ModelsDir "hf"
+$snapshotBase = Join-Path $WModelCacheHF "hub\$modelKey\snapshots"
 
 if (Test-Path $snapshotBase) {
     $latestSnap = Get-ChildItem $snapshotBase -Directory |
                   Sort-Object LastWriteTime -Descending | Select-Object -First 1
     if ($latestSnap) {
-        New-Item -ItemType Directory -Force -Path $whisperModelDir | Out-Null
-        Write-Info "展开模型文件到 models\whisper-$WhisperModel\ ..."
-        robocopy $latestSnap.FullName $whisperModelDir /E /NFL /NDL /NJH /NJS /NC /NS /NP | Out-Null
-        $modelSizeMB = [int]((Get-ChildItem $whisperModelDir -Recurse -File |
-                               Measure-Object -Property Length -Sum).Sum / 1MB)
-        Write-Ok "Whisper 模型已展开（${modelSizeMB} MB，省去 blobs 重复副本）"
+        $snapHash   = $latestSnap.Name
+        $destSnap   = Join-Path $hfPackDir "hub\$modelKey\snapshots\$snapHash"
+        $destRefs   = Join-Path $hfPackDir "hub\$modelKey\refs"
+        New-Item -ItemType Directory -Force -Path $destSnap | Out-Null
+        New-Item -ItemType Directory -Force -Path $destRefs | Out-Null
+        Write-Info "打包 Whisper 模型到 models\hf\ (只含 snapshot，无 blobs 副本)..."
+        robocopy $latestSnap.FullName $destSnap /E /NFL /NDL /NJH /NJS /NC /NS /NP | Out-Null
+        # 写 refs/main 让 huggingface_hub 能按 revision 定位
+        Set-Content (Join-Path $destRefs "main") $snapHash -Encoding ASCII -NoNewline
+        $modelFiles = @(Get-ChildItem $destSnap -Recurse -File -ErrorAction SilentlyContinue)
+        if ($modelFiles.Count -gt 0) {
+            $modelSizeMB = [int](($modelFiles | Measure-Object -Property Length -Sum).Sum / 1MB)
+            Write-Ok "Whisper 模型已打包（$($modelFiles.Count) 个文件，${modelSizeMB} MB）"
+        } else {
+            Write-Warn "snapshot 目录为空，目标机器首次启动将尝试联网下载"
+        }
     } else {
-        Write-Warn "找不到 snapshot 目录，服务首次启动时将自动下载"
+        Write-Warn "找不到 snapshot 子目录，服务首次启动时将自动下载"
     }
 } else {
     Write-Warn "缓存中未找到模型文件，服务首次启动时将自动下载"
@@ -497,8 +507,9 @@ try {
     if ($IncludeVosk) {
         $cfg.asr.model_path = "models/$CN_MODEL"
     }
-    # Point to flat model directory (no HF hub duplication)
-    $cfg.whisper.model  = "models/whisper-$WhisperModel"
+    # Use the standard HF model name — HF_HOME in start_whisper.bat points
+    # to the bundled models\hf\ cache, so no network access is needed.
+    $cfg.whisper.model  = $WhisperModel
     $cfg | ConvertTo-Json -Depth 10 | Set-Content $cfgOut -Encoding UTF8
     Write-Ok "config.json 路径已更新"
 } catch {
@@ -515,8 +526,9 @@ chcp 65001 >nul
 setlocal enabledelayedexpansion
 set PYTHONIOENCODING=utf-8
 set PYTHONUTF8=1
-:: 禁止 HuggingFace 联网（模型已展开到 models\whisper-$WhisperModel\）
-set TRANSFORMERS_OFFLINE=1
+:: 将 HF_HOME 指向包内缓存，禁止联网（模型已离线打包到 models\hf\）
+set HF_HOME=%~dp0models\hf
+set HF_HUB_OFFLINE=1
 set HF_DATASETS_OFFLINE=1
 cd /d "%~dp0"
 :: 将 nvidia pip 包的 DLL 目录加入 PATH，确保 ctranslate2 能加载 cublas64_12.dll 等
@@ -566,7 +578,8 @@ chcp 65001 >nul
 setlocal
 set PYTHONIOENCODING=utf-8
 set PYTHONUTF8=1
-set TRANSFORMERS_OFFLINE=1
+set HF_HOME=%~dp0models\hf
+set HF_HUB_OFFLINE=1
 cd /d "%~dp0"
 title 环境检测
 python\python.exe check_env.py
