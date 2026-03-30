@@ -279,7 +279,7 @@ switch ($GPU) {
         foreach ($nvp in $nvPkgs) {
             Write-Info "    pip install $nvp"
             & $PyExe -m pip install $nvp --prefer-binary `
-                --index-url https://pypi.org/simple --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
+                --index-url https://pypi.tuna.tsinghua.edu.cn/simple
             if ($LASTEXITCODE -ne 0) { Write-Warn "    $nvp 安装失败" }
         }
         # Verify DLLs landed in site-packages\nvidia\

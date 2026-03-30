@@ -3,7 +3,7 @@
     "port":  8765,
     "wake_word":  {
                       "enabled":  true,
-                      "mode":  "openwakeword",
+                      "mode":  "vosk",
                       "keywords":  ["小智"],
                       "openwakeword_models":  ["hey_jarvis"],
                       "sensitivity":  0.3,
