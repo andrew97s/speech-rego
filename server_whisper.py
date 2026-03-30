@@ -44,6 +44,7 @@ Whisper config section (config.json):
 import asyncio
 import json
 import logging
+import os
 import sys
 import time
 from typing import Optional, Set
@@ -331,6 +332,10 @@ class SpeechServer:
 # ── Entry point ────────────────────────────────────────────────────────────────
 
 def main():
+    # Ensure CWD = script directory so relative paths in config.json
+    # (e.g. "models/whisper-small") resolve correctly regardless of how
+    # the server was launched.
+    os.chdir(os.path.dirname(os.path.abspath(__file__)))
     config = load_config()
     setup_logging(config.get("log_level", "INFO"))
     server = SpeechServer(config)
