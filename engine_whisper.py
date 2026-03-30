@@ -521,6 +521,21 @@ class SpeechEngine:
         resolved_mode                     = _resolve_mode(cfg_ww.get("mode", "auto"), keywords)
 
         # ── Whisper model ──────────────────────────────────────────────────
+        # If the model name looks like a relative local path (contains a slash
+        # or backslash), resolve it relative to this source file so it works
+        # regardless of the process CWD (important for portable packages).
+        if (os.sep in whisper_model_name or "/" in whisper_model_name) \
+                and not os.path.isabs(whisper_model_name) \
+                and not os.path.isdir(whisper_model_name):
+            _candidate = os.path.join(
+                os.path.dirname(os.path.abspath(__file__)), whisper_model_name
+            )
+            if os.path.isdir(_candidate):
+                logger.debug(
+                    f"[preload] Resolved model path: {whisper_model_name!r} → {_candidate!r}"
+                )
+                whisper_model_name = _candidate
+
         model_key = (whisper_model_name, whisper_device, compute_type)
         if self._asr_model is not None and self._model_key == model_key:
             logger.info(
