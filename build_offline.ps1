@@ -31,22 +31,34 @@
 .PARAMETER IncludeVosk
     是否下载并打包 Vosk 中文模型（默认: $true）
 
+.PARAMETER IncludeOWW
+    是否安装 openwakeword 唤醒词包（默认: $false）
+    关闭可节省约 150 MB（省去 scipy + onnxruntime 等依赖）
+    默认唤醒词模式为 vosk/whisper，无需 openwakeword
+
+.PARAMETER BundleNvidiaCuda
+    是否将 nvidia-cublas / nvidia-cudnn 等 CUDA 运行库打包进部署包（默认: $false）
+    关闭可节省约 800 MB；目标机器需自行安装 NVIDIA CUDA Toolkit 12
+    启用可完全离线使用 CUDA：-BundleNvidiaCuda $true
+
 .PARAMETER OutputDir
     输出目录（默认: .\dist\SpeechReco-Offline）
 
 .EXAMPLE
-    .\build_offline.ps1
-    .\build_offline.ps1 -WhisperModel base -GPU none
+    .\build_offline.ps1                                  # 最小包（CPU/DML，无 OWW）
+    .\build_offline.ps1 -WhisperModel base -GPU none     # 纯 CPU 最小包
+    .\build_offline.ps1 -GPU cuda -BundleNvidiaCuda $true  # 完整 CUDA 离线包
     .\build_offline.ps1 -WhisperModel small -GPU cuda -OutputDir D:\deploy
 #>
 
 param(
-    [string] $WhisperModel = "small",
+    [string] $WhisperModel    = "small",
     [ValidateSet("none","cuda","dml","auto")]
-    [string] $GPU          = "auto",
-    [bool]   $IncludeVosk  = $true,
-    [bool]   $IncludeOWW   = $true,    # openwakeword 唤醒词（默认启用）
-    [string] $OutputDir    = ""
+    [string] $GPU             = "auto",
+    [bool]   $IncludeVosk     = $true,
+    [bool]   $IncludeOWW      = $false,   # openwakeword 唤醒词（默认关闭；默认用 vosk/whisper 唤醒词，无需额外依赖）
+    [bool]   $BundleNvidiaCuda = $false,  # 是否打包 nvidia-* CUDA 运行库（约 800MB）；false=目标机需自行安装 CUDA Toolkit
+    [string] $OutputDir       = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -149,6 +161,7 @@ Write-Host "  Whisper 模型  : $WhisperModel"
 Write-Host "  GPU 模式      : $GPU"
 Write-Host "  包含 Vosk     : $IncludeVosk"
 Write-Host "  包含 OWW      : $IncludeOWW"
+Write-Host "  打包 NVIDIA   : $BundleNvidiaCuda"
 Write-Host $border -ForegroundColor Cyan
 
 # ── STEP 1: Output directory ───────────────────────────────────────────────────
@@ -267,28 +280,34 @@ if ($IncludeOWW) {
 # GPU variant of onnxruntime
 switch ($GPU) {
     "cuda" {
-        # nvidia-* packages are NOT on Tsinghua mirror — must use official PyPI.
-        # Install explicitly so ctranslate2 can find cublas64_12.dll etc.
-        # in site-packages\nvidia\*\bin\ at runtime.
-        Write-Info "  安装 CUDA 运行库（从官方 PyPI，约 1-2 GB）..."
-        $nvPkgs = @(
-            'nvidia-cuda-runtime-cu12',
-            'nvidia-cublas-cu12',
-            'nvidia-cudnn-cu12'
-        )
-        foreach ($nvp in $nvPkgs) {
-            Write-Info "    pip install $nvp"
-            & $PyExe -m pip install $nvp --prefer-binary `
-                --index-url https://pypi.tuna.tsinghua.edu.cn/simple
-            if ($LASTEXITCODE -ne 0) { Write-Warn "    $nvp 安装失败" }
-        }
-        # Verify DLLs landed in site-packages\nvidia\
-        $nvDir = Join-Path $PythonDir "Lib\site-packages\nvidia"
-        if (Test-Path $nvDir) {
-            $dlls = @(Get-ChildItem $nvDir -Recurse -Filter "*.dll" -ErrorAction SilentlyContinue)
-            Write-Ok "  CUDA DLL 已打包：$($dlls.Count) 个文件"
+        if ($BundleNvidiaCuda) {
+            # nvidia-* packages are NOT on Tsinghua mirror — must use official PyPI.
+            # Install explicitly so ctranslate2 can find cublas64_12.dll etc.
+            # in site-packages\nvidia\*\bin\ at runtime.
+            Write-Info "  安装 CUDA 运行库（从官方 PyPI，约 800 MB）..."
+            $nvPkgs = @(
+                'nvidia-cuda-runtime-cu12',
+                'nvidia-cublas-cu12',
+                'nvidia-cudnn-cu12'
+            )
+            foreach ($nvp in $nvPkgs) {
+                Write-Info "    pip install $nvp"
+                & $PyExe -m pip install $nvp --prefer-binary `
+                    --index-url https://pypi.tuna.tsinghua.edu.cn/simple
+                if ($LASTEXITCODE -ne 0) { Write-Warn "    $nvp 安装失败" }
+            }
+            # Verify DLLs landed in site-packages\nvidia\
+            $nvDir = Join-Path $PythonDir "Lib\site-packages\nvidia"
+            if (Test-Path $nvDir) {
+                $dlls = @(Get-ChildItem $nvDir -Recurse -Filter "*.dll" -ErrorAction SilentlyContinue)
+                Write-Ok "  CUDA DLL 已打包：$($dlls.Count) 个文件"
+            } else {
+                Write-Warn "  site-packages\nvidia\ 不存在"
+            }
         } else {
-            Write-Warn "  site-packages\nvidia\ 不存在，CUDA 模式可能需要目标机器自行安装 CUDA Toolkit"
+            Write-Info "  跳过 nvidia-* CUDA 运行库打包（节省约 800 MB）"
+            Write-Warn "  目标机器需自行安装 NVIDIA CUDA Toolkit 12："
+            Write-Warn "    https://developer.nvidia.com/cuda-downloads"
         }
         & $PyExe -m pip uninstall onnxruntime -y --quiet 2>&1 | Out-Null
         Write-Info "  安装 onnxruntime-gpu..."
@@ -309,6 +328,48 @@ switch ($GPU) {
     }
 }
 Write-Ok "Python 依赖包安装完成"
+
+# ── STEP 4.5: 清理 site-packages，删除运行时不需要的文件 ─────────────────────────
+Write-Step "4.5" "清理 site-packages（删除缓存/测试/工具包）"
+
+$siteDir = Join-Path $PythonDir "Lib\site-packages"
+
+# 删除 __pycache__ 目录（所有包）
+$cacheDirs = @(Get-ChildItem $siteDir -Include "__pycache__" -Recurse -Directory -ErrorAction SilentlyContinue)
+foreach ($d in $cacheDirs) { Remove-Item $d.FullName -Recurse -Force -ErrorAction SilentlyContinue }
+Write-Info "  已删除 $($cacheDirs.Count) 个 __pycache__ 目录"
+
+# 删除 *.pyc / *.pyo 字节码文件
+$pycFiles = @(Get-ChildItem $siteDir -Include "*.pyc","*.pyo" -Recurse -File -ErrorAction SilentlyContinue)
+foreach ($f in $pycFiles) { Remove-Item $f.FullName -Force -ErrorAction SilentlyContinue }
+Write-Info "  已删除 $($pycFiles.Count) 个 .pyc/.pyo 字节码文件"
+
+# 删除各包内的 tests / test 目录（numpy、scipy 等测试数据较大）
+$testDirs = @(Get-ChildItem $siteDir -Include "tests","test" -Recurse -Directory -Depth 2 -ErrorAction SilentlyContinue)
+foreach ($d in $testDirs) { Remove-Item $d.FullName -Recurse -Force -ErrorAction SilentlyContinue }
+Write-Info "  已删除 $($testDirs.Count) 个测试目录"
+
+# 删除 pip / setuptools / wheel（嵌入式运行时不需要安装工具）
+foreach ($pkg in @("pip", "setuptools", "wheel", "_distutils_hack")) {
+    $pkgPath = Join-Path $siteDir $pkg
+    if (Test-Path $pkgPath) {
+        Remove-Item $pkgPath -Recurse -Force -ErrorAction SilentlyContinue
+        Write-Info "  已删除 $pkg"
+    }
+    # 也删除对应的 .dist-info
+    $distInfo = @(Get-ChildItem $siteDir -Filter "${pkg}-*.dist-info" -Directory -ErrorAction SilentlyContinue)
+    foreach ($d in $distInfo) { Remove-Item $d.FullName -Recurse -Force -ErrorAction SilentlyContinue }
+}
+
+# 删除 Scripts 下的 pip / wheel 可执行文件
+foreach ($exe in @("pip.exe","pip3.exe","pip3.11.exe","wheel.exe","easy_install.exe","easy_install-3.11.exe")) {
+    $exePath = Join-Path $PythonDir "Scripts\$exe"
+    if (Test-Path $exePath) { Remove-Item $exePath -Force -ErrorAction SilentlyContinue }
+}
+
+$afterMB = [int]((Get-ChildItem $PythonDir -Recurse -File -ErrorAction SilentlyContinue |
+                  Measure-Object -Property Length -Sum).Sum / 1MB)
+Write-Ok "清理完成，Python 目录当前大小：${afterMB} MB"
 
 # ── STEP 5: Whisper model ──────────────────────────────────────────────────────
 Write-Step 5 "下载 Whisper 模型（$WhisperModel）"
@@ -611,6 +672,9 @@ WebSocket 地址:
   - Visual C++ 2015-2022 Redistributable (x64)
     下载: https://aka.ms/vs/17/release/vc_redist.x64.exe
   - 麦克风设备
+  - 若使用 CUDA 模式且未打包 NVIDIA 库 (BundleNvidiaCuda=false):
+    需在目标机器安装 NVIDIA CUDA Toolkit 12
+    下载: https://developer.nvidia.com/cuda-downloads
 
 目录说明:
   python\               Python $PY_VER 嵌入式运行时 + 所有依赖包
