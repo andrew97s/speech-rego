@@ -5,12 +5,8 @@
                       "enabled":  true,
                       "mode":  "vosk",
                       "keywords":  ["小智"],
-                      "openwakeword_models":  ["hey_jarvis"],
                       "sensitivity":  0.3,
-                      "_mode_note":  "vosk=中文自定义词(需vosk模型) | openwakeword=英文预训练模型 | whisper=任意语言关键词(无需额外依赖) | auto=自动选择",
-                      "_keywords_note":  "vosk/whisper模式使用此字段；openwakeword模式使用 openwakeword_models",
-                      "_openwakeword_models_note":  "内置模型: hey_jarvis / alexa / hey_mycroft / timer / weather；也可填 .onnx 文件路径",
-                      "_sensitivity_note":  "openwakeword推荐0.3-0.5；值越低越灵敏但误触发越多"
+                      "_mode_note":  "vosk=中文自定义词(需vosk模型) | whisper=任意语言关键词(无需额外依赖) | auto=自动选择"
                   },
     "asr":  {
                 "model_path":  "models/vosk-model-small-cn-0.22",
@@ -46,5 +42,6 @@
                   "energy_threshold":  0.02,
                   "_device_note":  "null=系统默认麦克风; 运行 list_devices.py 查看设备ID"
               },
-    "log_level":  "INFO"
+    "log_level":  "INFO",
+    "http_port":  8080
 }

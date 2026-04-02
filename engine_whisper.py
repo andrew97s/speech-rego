@@ -5,10 +5,9 @@ ASR backend: faster-whisper (CTranslate2), supports mixed Chinese/English
              with language=None (auto-detect per session).
 
 Wake word detection:
-  vosk         -- Vosk grammar/keyword-spotting (Chinese custom keywords)
-  openwakeword -- pre-trained ONNX models (English: hey_jarvis, alexa, …)
-  whisper      -- Whisper-based keyword spotting (any language, no extra deps)
-  auto         -- CJK keywords → vosk; ASCII keywords → openwakeword
+  vosk    -- Vosk grammar/keyword-spotting (Chinese custom keywords)
+  whisper -- Whisper-based keyword spotting (any language, no extra deps)
+  auto    -- CJK keywords → vosk; other keywords → whisper
 
 State machine:
   STOPPED -> start() -> NO_DEVICE (no mic) or IDLE (mic ok)
@@ -49,9 +48,12 @@ def _has_cjk(text: str) -> bool:
 
 def _resolve_mode(mode: str, keywords: List[str]) -> str:
     if mode == "auto":
-        # Chinese keywords → vosk; ASCII-only → openwakeword
-        return "vosk" if any(_has_cjk(kw) for kw in keywords) else "openwakeword"
-    return mode  # vosk / openwakeword / whisper passed through as-is
+        # Chinese keywords → vosk; other keywords → whisper (no extra deps)
+        return "vosk" if any(_has_cjk(kw) for kw in keywords) else "whisper"
+    if mode == "openwakeword":
+        # openwakeword removed; fall back to whisper mode
+        return "whisper"
+    return mode  # vosk / whisper passed through as-is
 
 
 def _buffer_to_float32(buf: List[bytes]) -> np.ndarray:
@@ -279,29 +281,6 @@ class _VoskWakeWordDetector:
         return None
 
 
-class _OpenWakeWordDetector:
-    def __init__(self, keywords: List[str], sensitivity: float):
-        from openwakeword.model import Model   # type: ignore
-        self.sensitivity = sensitivity
-        self._model = Model(wakeword_models=keywords, inference_framework="onnx")
-        # openwakeword resolves short names (e.g. "hey_jarvis") to full ONNX
-        # paths internally and uses those full paths as score-dict keys.
-        # We must look up scores by the same keys the Model actually uses.
-        self._score_keys = list(self._model.models.keys())
-        friendly = [os.path.splitext(os.path.basename(k))[0] for k in self._score_keys]
-        logger.info(f"[WakeWord] OpenWakeWord mode -- models: {friendly}")
-
-    def process(self, audio_f32: np.ndarray) -> Optional[str]:
-        scores: dict = self._model.predict(audio_f32)
-        for key in self._score_keys:
-            score = float(scores.get(key, 0.0))
-            if score > 0.1:   # only log non-trivial scores to avoid spam
-                name = os.path.splitext(os.path.basename(key))[0]
-                logger.debug(f"[WakeWord/OWW] {name} score={score:.3f} (threshold={self.sensitivity})")
-            if score >= self.sensitivity:
-                return os.path.splitext(os.path.basename(key))[0]
-        return None
-
 
 class _WhisperWakeWordDetector:
     """
@@ -433,6 +412,13 @@ class SpeechEngine:
             # Invalidate cached wake word detector so it rebuilds on next start
             if key.startswith("wake_word."):
                 self._ww_key = None
+            # Whisper model params that need a full model reload
+            if key in ("whisper.model", "whisper.device", "whisper.compute_type"):
+                self._model_key = None   # force reload on next start()
+                self._ww_key    = None   # wake word detector references the model
+            # Sync initial_prompt immediately so in-flight sessions pick it up
+            if key == "whisper.initial_prompt":
+                self._initial_prompt = value
             return True
         except (KeyError, TypeError):
             logger.warning(f"Invalid config key: {key!r}")
@@ -471,6 +457,10 @@ class SpeechEngine:
         # Skip clips shorter than 0.3 s to avoid spurious output
         if len(audio_f32) < _WHISPER_SAMPLE_RATE * 0.3:
             return ""
+        # Skip nearly-silent buffers — Whisper hallucinates initial_prompt words on silence
+        rms = float(np.sqrt(np.mean(audio_f32 ** 2)))
+        if rms < 0.004:
+            return ""
         try:
             segments, _ = whisper_model.transcribe(
                 audio_f32,
@@ -482,7 +472,12 @@ class SpeechEngine:
                 initial_prompt             = getattr(self, "_initial_prompt", None),
                 condition_on_previous_text = False,      # prevent context bleeding between sessions
             )
-            return "".join(seg.text for seg in segments).strip()
+            # Filter out segments where Whisper itself is not confident it heard speech
+            parts = []
+            for seg in segments:
+                if getattr(seg, "no_speech_prob", 0.0) < 0.6:
+                    parts.append(seg.text)
+            return "".join(parts).strip()
         except Exception as exc:
             logger.warning(f"Whisper inference error: {exc}")
             return ""
@@ -605,7 +600,6 @@ class SpeechEngine:
             resolved_mode,
             tuple(keywords),
             sensitivity,
-            tuple(cfg_ww.get("openwakeword_models") or []),
             self.config.get("asr", {}).get("model_path", ""),
         )
         if self._ww_detector is not None and self._ww_key == ww_key:
@@ -630,9 +624,9 @@ class SpeechEngine:
                             ww_detector = _VoskWakeWordDetector(
                                 vosk_model, _WHISPER_SAMPLE_RATE, keywords
                             )
-                        else:  # openwakeword
-                            oww_models  = cfg_ww.get("openwakeword_models") or keywords
-                            ww_detector = _OpenWakeWordDetector(oww_models, sensitivity)
+                        else:
+                            # Unknown mode — should not happen after _resolve_mode()
+                            raise ValueError(f"Unsupported wake word mode: {resolved_mode!r}")
                     except Exception as exc:
                         logger.warning(
                             f"[preload] Wake word init failed ({exc}); "
@@ -674,15 +668,25 @@ class SpeechEngine:
         energy_threshold:  float = cfg_audio.get("energy_threshold", 0.02)
         device                   = cfg_audio.get("device") or None
 
-        # Whisper-specific settings used by the audio loop
-        language:            Optional[str] = cfg_whisper.get("language")
-        max_silence_ms:      int          = cfg_whisper.get("max_silence_ms", 2500)
-        max_listen_ms:       int          = cfg_whisper.get("max_listen_ms", 30000)
-        partial_interval_ms: int          = cfg_whisper.get("partial_interval_ms", 2000)
-        vad_cooldown_ms:     int          = cfg_whisper.get("vad_cooldown_ms", 500)
-        vad_min_speech_ms:   int          = cfg_whisper.get("vad_min_speech_ms", 200)
-        min_listen_ms:       int          = cfg_whisper.get("min_listen_ms", 600)
-        self._initial_prompt               = cfg_whisper.get("initial_prompt")
+        # Whisper-specific settings – read from self.config at each session start
+        # so that runtime config updates (via WebSocket "config" command) take
+        # effect immediately without restarting the engine.
+        def _wparams():
+            w = self.config.get("whisper", {})
+            return (
+                w.get("language"),
+                w.get("max_silence_ms",      2500),
+                w.get("max_listen_ms",       30000),
+                w.get("partial_interval_ms", 2000),
+                w.get("vad_cooldown_ms",     500),
+                w.get("vad_min_speech_ms",   200),
+                w.get("min_listen_ms",       600),
+            )
+
+        (language, max_silence_ms, max_listen_ms,
+         partial_interval_ms, vad_cooldown_ms,
+         vad_min_speech_ms, min_listen_ms) = _wparams()
+        self._initial_prompt = cfg_whisper.get("initial_prompt")
 
         # ── Load / reuse cached models ────────────────────────────────────────
         # (preload() at server startup means this is a no-op on start() calls)
@@ -802,6 +806,11 @@ class SpeechEngine:
 
                             if self._trigger_listen.is_set():
                                 self._trigger_listen.clear()
+                                # Refresh all session params — picks up any runtime
+                                # config changes made via the WebSocket "config" cmd
+                                (language, max_silence_ms, max_listen_ms,
+                                 partial_interval_ms, vad_cooldown_ms,
+                                 vad_min_speech_ms, min_listen_ms) = _wparams()
                                 listen_buf    = [audio_bytes]
                                 listen_start  = time.time()
                                 silence_start = None
@@ -819,13 +828,9 @@ class SpeechEngine:
                             if ww_enabled and ww_detector is not None:
                                 if resolved_mode == "vosk":
                                     detected = ww_detector.process(audio_bytes)
-                                elif resolved_mode == "whisper":
+                                else:  # whisper
                                     detected = ww_detector.process(
                                         audio_bytes, rms, energy_threshold
-                                    )
-                                else:
-                                    detected = ww_detector.process(
-                                        audio_np.astype(np.float32) / 32768.0
                                     )
 
                                 if detected:
@@ -834,6 +839,10 @@ class SpeechEngine:
                                         "event": "wake_word", "keyword": detected,
                                         "score": 1.0, "ts": time.time(),
                                     })
+                                    # Refresh session params on every new session
+                                    (language, max_silence_ms, max_listen_ms,
+                                     partial_interval_ms, vad_cooldown_ms,
+                                     vad_min_speech_ms, min_listen_ms) = _wparams()
                                     listen_buf    = []
                                     listen_start  = time.time()
                                     silence_start = None
@@ -853,6 +862,9 @@ class SpeechEngine:
                                     elif (now - _vad_speech_since) * 1000 >= vad_min_speech_ms:
                                         _vad_speech_since   = None
                                         _vad_cooldown_until = 0.0
+                                        (language, max_silence_ms, max_listen_ms,
+                                         partial_interval_ms, vad_cooldown_ms,
+                                         vad_min_speech_ms, min_listen_ms) = _wparams()
                                         listen_buf    = [audio_bytes]
                                         listen_start  = time.time()
                                         silence_start = None

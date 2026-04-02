@@ -81,7 +81,7 @@ echo    Press Ctrl+C to stop
 echo  ================================================
 echo.
 
-"%~dp0python\python.exe" "%~dp0server.py"
+echo y | "%~dp0python\python.exe" "%~dp0server.py"
 
 echo.
 echo  Service stopped.

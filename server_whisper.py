@@ -46,6 +46,7 @@ import json
 import logging
 import os
 import sys
+import threading
 import time
 from typing import Optional, Set
 
@@ -94,6 +95,7 @@ _DEFAULTS: dict = {
         "energy_threshold": 0.02,
     },
     "log_level": "INFO",
+    "http_port": 8080,   # 0 = disabled; serve index.html on this port
 }
 
 
@@ -299,6 +301,9 @@ class SpeechServer:
         self.logger.info(f"  Model      : {wcfg.get('model', 'base')}")
         self.logger.info(f"  Language   : {lang_str}")
         self.logger.info(f"  Device     : {wcfg.get('device', 'cpu')} / {wcfg.get('compute_type', 'int8')}")
+        http_port = self.config.get("http_port", 8080)
+        if http_port:
+            self.logger.info(f"  UI         : http://127.0.0.1:{http_port}/index.html")
         self.logger.info(border)
 
         # Pre-load Whisper model + wake word detector before accepting connections
@@ -329,15 +334,47 @@ class SpeechServer:
             self.logger.info("Server stopped.")
 
 
+# ── HTTP static server ─────────────────────────────────────────────────────────
+
+def _start_http_server(port: int, directory: str):
+    """Serve *directory* over HTTP on *port* in a daemon thread.
+    Silently disabled when port == 0."""
+    if not port:
+        return
+    import http.server
+    handler = http.server.SimpleHTTPRequestHandler
+
+    class _QuietHandler(handler):
+        """Suppress per-request log lines to keep the console clean."""
+        def log_message(self, fmt, *args):   # noqa: ARG002
+            pass
+        def log_error(self, fmt, *args):
+            logging.getLogger("http").warning(fmt % args)
+
+    def _serve():
+        os.chdir(directory)
+        with http.server.HTTPServer(("", port), _QuietHandler) as httpd:
+            logging.getLogger("http").info(
+                f"HTTP server: http://127.0.0.1:{port}/index.html"
+            )
+            httpd.serve_forever()
+
+    t = threading.Thread(target=_serve, daemon=True, name="HTTPServer")
+    t.start()
+
+
 # ── Entry point ────────────────────────────────────────────────────────────────
 
 def main():
     # Ensure CWD = script directory so relative paths in config.json
     # (e.g. "models/whisper-small") resolve correctly regardless of how
     # the server was launched.
-    os.chdir(os.path.dirname(os.path.abspath(__file__)))
+    app_dir = os.path.dirname(os.path.abspath(__file__))
+    os.chdir(app_dir)
     config = load_config()
     setup_logging(config.get("log_level", "INFO"))
+    http_port = config.get("http_port", 8080)
+    _start_http_server(http_port, app_dir)
     server = SpeechServer(config)
     try:
         asyncio.run(server.run())

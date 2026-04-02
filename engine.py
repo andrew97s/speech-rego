@@ -37,9 +37,11 @@ def _has_cjk(text: str) -> bool:
 
 
 def _resolve_mode(mode: str, keywords: List[str]) -> str:
+    if mode == "openwakeword":
+        return "vosk"   # openwakeword removed; fall back to vosk
     if mode != "auto":
         return mode
-    return "vosk" if any(_has_cjk(kw) for kw in keywords) else "openwakeword"
+    return "vosk"   # engine.py only supports vosk wake word
 
 
 # ── Wake word detectors ────────────────────────────────────────────────────────
@@ -79,21 +81,6 @@ class _VoskWakeWordDetector:
                 return normalized
         return None
 
-
-class _OpenWakeWordDetector:
-    def __init__(self, keywords: List[str], sensitivity: float):
-        from openwakeword.model import Model  # type: ignore
-        self.keywords = keywords
-        self.sensitivity = sensitivity
-        self._model = Model(wakeword_models=keywords, inference_framework="onnx")
-        logger.info(f"[WakeWord] OpenWakeWord mode -- keywords: {keywords}")
-
-    def process(self, audio_f32: np.ndarray) -> Optional[str]:
-        scores: dict = self._model.predict(audio_f32)
-        for kw in self.keywords:
-            if float(scores.get(kw, 0.0)) >= self.sensitivity:
-                return kw
-        return None
 
 
 # ── Engine state ───────────────────────────────────────────────────────────────
@@ -229,23 +216,9 @@ class SpeechEngine:
                 if resolved_mode == "vosk":
                     ww_detector = _VoskWakeWordDetector(asr_model, sample_rate, keywords)
                 else:
-                    try:
-                        ww_detector = _OpenWakeWordDetector(keywords, sensitivity)
-                    except Exception as oww_exc:
-                        logger.warning(
-                            f"OpenWakeWord failed ({oww_exc}), "
-                            "falling back to Vosk keyword-spotting."
-                        )
-                        self.emit({
-                            "event": "error", "code": "wake_word_fallback",
-                            "message": (
-                                f"openwakeword unavailable ({oww_exc}), "
-                                "switched to Vosk keyword-spotting."
-                            ),
-                            "ts": time.time(),
-                        })
-                        ww_detector = _VoskWakeWordDetector(asr_model, sample_rate, keywords)
-                        resolved_mode = "vosk"
+                    # Only vosk is supported in the Vosk engine
+                    ww_detector = _VoskWakeWordDetector(asr_model, sample_rate, keywords)
+                    resolved_mode = "vosk"
             except Exception as exc:
                 logger.warning(f"Wake word init failed: {exc}. Using energy-based VAD.")
                 self.emit({

@@ -287,8 +287,8 @@ switch ($GPU) {
             Write-Info "  安装 CUDA 运行库（从官方 PyPI，约 800 MB）..."
             $nvPkgs = @(
                 'nvidia-cuda-runtime-cu12',
-                'nvidia-cublas-cu12',
-                'nvidia-cudnn-cu12'
+                'nvidia-cublas-cu12'
+                # nvidia-cudnn-cu12 不需要：ctranslate2 只用 cuBLAS，不用 cuDNN
             )
             foreach ($nvp in $nvPkgs) {
                 Write-Info "    pip install $nvp"
@@ -605,7 +605,7 @@ echo    Whisper 模型: $WhisperModel
 echo    Press Ctrl+C 停止服务
 echo  ================================================
 echo.
-python\python.exe server_whisper.py
+echo y | python\python.exe server_whisper.py
 echo.
 echo 服务已停止。
 pause
@@ -626,7 +626,7 @@ echo    语音识别服务 (Vosk)   端口 8765
 echo    Press Ctrl+C 停止服务
 echo  ================================================
 echo.
-python\python.exe server.py
+echo y | python\python.exe server.py
 echo.
 echo 服务已停止。
 pause

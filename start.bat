@@ -44,7 +44,7 @@ echo    Press Ctrl+C to stop
 echo  ================================================
 echo.
 
-.venv\Scripts\python.exe server.py
+echo y | .venv\Scripts\python.exe server.py
 
 echo.
 echo  Service stopped.
