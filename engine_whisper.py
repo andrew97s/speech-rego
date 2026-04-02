@@ -691,10 +691,10 @@ class SpeechEngine:
         # ── Load / reuse cached models ────────────────────────────────────────
         # (preload() at server startup means this is a no-op on start() calls)
         self._ensure_models_loaded()
-        asr_model     = self._asr_model
-        ww_detector   = self._ww_detector
-        resolved_mode = self._ww_resolved_mode
-        ww_enabled    = self.config["wake_word"].get("enabled", True)
+        asr_model = self._asr_model
+        # NOTE: ww_detector / resolved_mode / ww_enabled are read dynamically from
+        # self in the inner IDLE loop so that runtime config changes (keyword update,
+        # mode change, enable/disable) take effect immediately without engine restart.
 
         # ── Hot-plug device loop ──────────────────────────────────────────────
         while not self._stop_event.is_set():
@@ -825,11 +825,17 @@ class SpeechEngine:
                                 self._set_state(EngineState.LISTENING)
                                 continue
 
-                            if ww_enabled and ww_detector is not None:
-                                if resolved_mode == "vosk":
-                                    detected = ww_detector.process(audio_bytes)
+                            # Read detector state fresh every chunk — picks up any
+                            # changes applied by preload() running in a background thread.
+                            _ww_det     = self._ww_detector
+                            _ww_mode    = self._ww_resolved_mode
+                            _ww_enabled = self.config["wake_word"].get("enabled", True)
+
+                            if _ww_enabled and _ww_det is not None:
+                                if _ww_mode == "vosk":
+                                    detected = _ww_det.process(audio_bytes)
                                 else:  # whisper
-                                    detected = ww_detector.process(
+                                    detected = _ww_det.process(
                                         audio_bytes, rms, energy_threshold
                                     )
 

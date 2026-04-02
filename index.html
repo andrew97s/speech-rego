@@ -287,9 +287,9 @@
   .log-line.ev-system          { color: var(--muted); }
 
   /* ── Mode hint ───────────────────────────────────────────────── */
-  .hint-vosk         { border-color: var(--primary); color: #8ab4f8; }
-  .hint-openwakeword { border-color: var(--warn);    color: var(--warn); }
-  .hint-auto         { border-color: var(--success); color: var(--success); }
+  .hint-vosk    { border-color: var(--primary); color: #8ab4f8; }
+  .hint-whisper { border-color: var(--warn);    color: var(--warn); }
+  .hint-auto    { border-color: var(--success); color: var(--success); }
 
   /* ── Raw send ────────────────────────────────────────────────── */
   .raw-row { display: flex; gap: 8px; }
@@ -386,36 +386,22 @@
       <div class="config-row">
         <label>检测模式</label>
         <select id="cfgMode" onchange="applyMode()">
+          <option value="vosk" selected>vosk（中文自定义）</option>
+          <option value="whisper">whisper（任意语言）</option>
           <option value="auto">auto（自动）</option>
-          <option value="vosk">vosk（中文自定义）</option>
-          <option value="openwakeword">openwakeword（英文）</option>
         </select>
       </div>
       <div id="modeHint" class="config-hint hint-vosk">
-        vosk: 语音模型关键词检测，支持任意中文词（如"你好小智"）
+        vosk: 语音模型关键词检测，支持任意中文词（如"小智"）
       </div>
 
       <div class="config-row">
         <label>唤醒词</label>
-        <input type="text" id="cfgKeyword" value="你好小智" placeholder="你好小智 或 hey_jarvis">
+        <input type="text" id="cfgKeyword" value="小智" placeholder="小智 或 hey jarvis">
         <button class="btn btn-ghost btn-sm" onclick="applyKeyword()">应用</button>
       </div>
       <div class="config-hint" style="border-color:var(--border)">
-        多个词用英文逗号分隔：<code style="color:var(--primary)">你好小智,开始录音</code>
-      </div>
-
-      <div class="config-row">
-        <label>灵敏度</label>
-        <div style="flex:1;min-width:0;display:flex;align-items:center;gap:6px;">
-          <input type="range" id="cfgSens" min="0.1" max="1.0" step="0.05" value="0.5"
-                 style="flex:1;min-width:0;accent-color:var(--primary)"
-                 oninput="document.getElementById('cfgSensVal').textContent=this.value">
-          <span class="range-val" id="cfgSensVal">0.5</span>
-        </div>
-        <button class="btn btn-ghost btn-sm" onclick="applySensitivity()">应用</button>
-      </div>
-      <div class="config-hint" style="border-color:var(--border)">
-        仅 openwakeword 模式有效
+        多个词用英文逗号分隔：<code style="color:var(--primary)">小智,开始录音</code>
       </div>
 
       <div class="config-row" style="align-items:flex-start">
@@ -427,14 +413,89 @@
         </label>
       </div>
 
-      <div class="config-row" style="margin-top:4px;">
+    </div><!-- /config card -->
+
+    <!-- Whisper config -->
+    <div class="card">
+      <div class="card-title">Whisper 参数</div>
+
+      <div class="config-row">
+        <label>模型</label>
+        <select id="wModel" onchange="applyWhisperCfg('whisper.model', this.value)">
+          <option value="tiny">tiny（最快）</option>
+          <option value="base">base</option>
+          <option value="small" selected>small（推荐）</option>
+          <option value="medium">medium</option>
+          <option value="large-v3">large-v3（最准）</option>
+        </select>
+      </div>
+      <div class="config-hint" style="border-color:var(--border)">
+        更换模型需重启引擎才生效
+      </div>
+
+      <div class="config-row">
+        <label>语言</label>
+        <select id="wLang" onchange="applyWhisperCfg('whisper.language', this.value || null)">
+          <option value="zh" selected>zh（中文）</option>
+          <option value="en">en（英文）</option>
+          <option value="">null（自动检测）</option>
+        </select>
+      </div>
+
+      <div class="config-row">
+        <label>推理设备</label>
+        <select id="wDevice" onchange="applyWhisperCfg('whisper.device', this.value)">
+          <option value="cuda" selected>cuda（NVIDIA GPU）</option>
+          <option value="dml">dml（DirectML）</option>
+          <option value="cpu">cpu</option>
+        </select>
+      </div>
+
+      <div class="config-row">
+        <label>精度</label>
+        <select id="wCompute" onchange="applyWhisperCfg('whisper.compute_type', this.value)">
+          <option value="float16" selected>float16（GPU 推荐）</option>
+          <option value="int8">int8（CPU 推荐）</option>
+          <option value="float32">float32</option>
+        </select>
+      </div>
+
+      <div class="config-row">
         <label>静音超时</label>
-        <input type="number" id="cfgSilence" value="1500" min="500" max="5000" step="100">
+        <input type="number" id="cfgSilence" value="2500" min="500" max="8000" step="100">
         <span style="font-size:.75rem;color:var(--muted)">ms</span>
         <button class="btn btn-ghost btn-sm" onclick="applySilenceMs()">应用</button>
       </div>
 
-    </div><!-- /config card -->
+      <div class="config-row">
+        <label>最短录音</label>
+        <input type="number" id="cfgMinListen" value="600" min="100" max="3000" step="100">
+        <span style="font-size:.75rem;color:var(--muted)">ms</span>
+        <button class="btn btn-ghost btn-sm" onclick="applyMinListenMs()">应用</button>
+      </div>
+
+      <div class="config-row">
+        <label>实时预览</label>
+        <input type="number" id="cfgPartial" value="2000" min="0" max="5000" step="500">
+        <span style="font-size:.75rem;color:var(--muted)">ms（0=关）</span>
+        <button class="btn btn-ghost btn-sm" onclick="applyPartialMs()">应用</button>
+      </div>
+
+      <div class="config-row" style="align-items:flex-start">
+        <label style="padding-top:4px">提示词</label>
+        <textarea id="cfgPrompt" rows="2"
+          style="flex:1;min-width:0;background:var(--bg);border:1px solid var(--border);
+                 border-radius:5px;padding:5px 8px;color:var(--text);font-size:.78rem;
+                 resize:vertical;outline:none;"
+          placeholder="引导Whisper识别风格，留空则不使用"></textarea>
+        <button class="btn btn-ghost btn-sm" style="align-self:flex-start;margin-left:4px"
+                onclick="applyPrompt()">应用</button>
+      </div>
+      <div class="config-hint" style="border-color:var(--border)">
+        例：<code style="color:var(--primary)">机 1 2 3 栋 层 房间 烟感 火警</code>
+      </div>
+
+    </div><!-- /whisper card -->
 
     <!-- Env check -->
     <div class="card">
@@ -550,18 +611,18 @@
     const mode = document.getElementById('cfgMode').value;
     send({ cmd: 'config', key: 'wake_word.mode', value: mode });
     updateModeHint(mode);
-    logEvent('system', '唤醒模式已设为: ' + mode + '（重启引擎后生效）');
+    logEvent('system', '唤醒模式已设为: ' + mode);
   }
 
   function updateModeHint(mode) {
     const hints = {
-      auto:         'auto: 含中文关键词自动用 Vosk，否则用 openwakeword',
-      vosk:         'vosk: 语音模型关键词检测，支持任意中文词（如"你好小智"）',
-      openwakeword: 'openwakeword: 英文预训练，可用词: hey_jarvis / alexa / hey_mycroft',
+      vosk:    'vosk: 语音模型关键词检测，支持任意中文词（如"小智"）',
+      whisper: 'whisper: 用 Whisper 模型做关键词检测，支持任意语言，无需额外依赖',
+      auto:    'auto: 含中文关键词自动用 vosk，否则用 whisper',
     };
     const el = document.getElementById('modeHint');
     el.textContent = hints[mode] || '';
-    el.className = 'config-hint hint-' + mode;
+    el.className = 'config-hint hint-' + (hints[mode] ? mode : 'auto');
   }
 
   function applyKeyword() {
@@ -569,18 +630,37 @@
     if (!raw) return;
     const kws = raw.split(',').map(s => s.trim()).filter(Boolean);
     send({ cmd: 'config', key: 'wake_word.keywords', value: kws });
-  }
-
-  function applySensitivity() {
-    const v = parseFloat(document.getElementById('cfgSens').value);
-    send({ cmd: 'config', key: 'wake_word.sensitivity', value: v });
+    logEvent('system', '唤醒词已更新: ' + kws.join(', ') + '（立即生效）');
   }
 
   function sendConfigBool(key, value) { send({ cmd: 'config', key, value }); }
 
   function applySilenceMs() {
     const v = parseInt(document.getElementById('cfgSilence').value, 10);
-    send({ cmd: 'config', key: 'asr.max_silence_ms', value: v });
+    send({ cmd: 'config', key: 'whisper.max_silence_ms', value: v });
+  }
+
+  function applyMinListenMs() {
+    const v = parseInt(document.getElementById('cfgMinListen').value, 10);
+    send({ cmd: 'config', key: 'whisper.min_listen_ms', value: v });
+  }
+
+  function applyPartialMs() {
+    const v = parseInt(document.getElementById('cfgPartial').value, 10);
+    send({ cmd: 'config', key: 'whisper.partial_interval_ms', value: v });
+  }
+
+  function applyWhisperCfg(key, value) {
+    send({ cmd: 'config', key, value });
+    if (key === 'whisper.model' || key === 'whisper.device' || key === 'whisper.compute_type') {
+      logEvent('system', key + ' = ' + value + '（需重启引擎生效）');
+    }
+  }
+
+  function applyPrompt() {
+    const v = document.getElementById('cfgPrompt').value.trim();
+    send({ cmd: 'config', key: 'whisper.initial_prompt', value: v || null });
+    logEvent('system', '提示词已更新' + (v ? ': ' + v : '（已清除）'));
   }
 
   // ── Event handler ─────────────────────────────────────────────────────────────
@@ -822,6 +902,7 @@
   // ── Init ─────────────────────────────────────────────────────────────────────
   updateModeHint(document.getElementById('cfgMode').value);
   logEvent('system', '就绪，点击「连接」开始。');
+  // Removed applySensitivity — sensitivity slider removed with openwakeword
 </script>
 </body>
 </html>
