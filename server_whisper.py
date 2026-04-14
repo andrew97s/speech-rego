@@ -212,9 +212,10 @@ class SpeechServer:
             await ws.send(json.dumps({"event": "ack", "cmd": "stop", "ts": ts}))
 
         elif cmd == "listen":
+            # 判断麦克分设备是否可用
             self.engine.trigger_listen()
             await ws.send(json.dumps({"event": "ack", "cmd": "listen", "ts": ts}))
-
+            await ws.send(json.dumps(self._status_event()))
         elif cmd == "cancel":
             self.engine.cancel_listen()
             await ws.send(json.dumps({"event": "ack", "cmd": "cancel", "ts": ts}))

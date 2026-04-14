@@ -57,7 +57,7 @@ param(
     [string] $GPU             = "auto",
     [bool]   $IncludeVosk     = $true,
     [bool]   $IncludeOWW      = $false,   # openwakeword 唤醒词（默认关闭；默认用 vosk/whisper 唤醒词，无需额外依赖）
-    [bool]   $BundleNvidiaCuda = $false,  # 是否打包 nvidia-* CUDA 运行库（约 800MB）；false=目标机需自行安装 CUDA Toolkit
+    [bool]   $BundleNvidiaCuda = $true,  # 是否打包 nvidia-* CUDA 运行库（约 800MB）；false=目标机需自行安装 CUDA Toolkit
     [string] $OutputDir       = ""
 )
 
