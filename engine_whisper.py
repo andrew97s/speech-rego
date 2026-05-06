@@ -56,6 +56,41 @@ def _resolve_mode(mode: str, keywords: List[str]) -> str:
     return mode  # vosk / whisper passed through as-is
 
 
+def _normalize_for_prompt_compare(s: str) -> str:
+    """Whitespace / common separators — for comparing transcript to initial_prompt."""
+    if not s:
+        return ""
+    return re.sub(r"[\s\u3000·]+", "", s.strip())
+
+
+def _text_echoes_initial_prompt(text: str, initial_prompt: Optional[str]) -> bool:
+    """
+    Silence/noise + initial_prompt often causes Whisper to decode the prompt itself.
+    Drop obvious cases: long contiguous slice of the prompt, or long subsequence
+    covering a large fraction of the prompt (not single short domain words).
+    """
+    if not initial_prompt or not text:
+        return False
+    t = _normalize_for_prompt_compare(text)
+    p = _normalize_for_prompt_compare(initial_prompt)
+    if len(t) < 4 or len(p) < 4:
+        return False
+    # 复读提示词中很长一段（典型幻听）
+    if t in p and len(t) >= max(8, int(0.45 * len(p))):
+        return True
+    if t in p and len(p) <= 24 and len(t) >= int(0.82 * len(p)):
+        return True
+    # 按提示词顺序「抠」字能组成整段且占比高
+    if len(t) >= 10 and len(t) >= 0.38 * len(p):
+        i = 0
+        for c in p:
+            if i < len(t) and c == t[i]:
+                i += 1
+        if i == len(t):
+            return True
+    return False
+
+
 def _buffer_to_float32(buf: List[bytes]) -> np.ndarray:
     """Concatenate int16 byte chunks and normalise to float32 [-1, 1]."""
     if not buf:
@@ -333,7 +368,13 @@ class _WhisperWakeWordDetector:
                 initial_prompt           = self._prompt,  # bias towards wake word
                 condition_on_previous_text = False,
             )
-            text = "".join(s.text for s in segs).replace(" ", "").lower()
+            # 未过滤时，静音/噪声易被 initial_prompt 诱导成「像唤醒词」的幻觉
+            _WW_MAX_NS = 0.42
+            parts = []
+            for s in segs:
+                if getattr(s, "no_speech_prob", 1.0) < _WW_MAX_NS:
+                    parts.append(s.text)
+            text = "".join(parts).replace(" ", "").lower()
         except Exception:
             return None
 
@@ -374,6 +415,7 @@ class SpeechEngine:
         self._ww_detector:      Optional[object] = None
         self._ww_key:           Optional[tuple]  = None
         self._ww_resolved_mode: str              = "whisper"
+        self._preload_lock      = threading.Lock()
 
     # ── Public control API ────────────────────────────────────────────────────
 
@@ -407,6 +449,15 @@ class SpeechEngine:
             cfg   = self.config
             for part in parts[:-1]:
                 cfg = cfg[part]
+            if key in (
+                "whisper.max_silence_ms",
+                "whisper.min_listen_ms",
+                "whisper.max_listen_ms",
+                "whisper.partial_interval_ms",
+                "whisper.vad_cooldown_ms",
+                "whisper.vad_min_speech_ms",
+            ) and value is not None:
+                value = int(float(value))
             cfg[parts[-1]] = value
             logger.info(f"Config updated: {key} = {value!r}")
             # Invalidate cached wake word detector so it rebuilds on next start
@@ -429,13 +480,17 @@ class SpeechEngine:
     def _set_state(self, state: EngineState):
         self.state = state
         ww = self.config["wake_word"]
+        w  = self.config.get("whisper", {})
         self.emit({
-            "event":             "status",
-            "state":             state.value,
-            "wake_word_enabled": ww.get("enabled", True),
-            "keywords":          ww.get("keywords", []),
-            "mode":              ww.get("mode", "auto"),
-            "ts":                time.time(),
+            "event":                 "status",
+            "state":                 state.value,
+            "wake_word_enabled":     ww.get("enabled", True),
+            "keywords":              ww.get("keywords", []),
+            "mode":                  ww.get("mode", "auto"),
+            "whisper_max_silence_ms": w.get("max_silence_ms", 2500),
+            "whisper_min_listen_ms":  w.get("min_listen_ms", 600),
+            "whisper_max_listen_ms":  w.get("max_listen_ms", 30000),
+            "ts":                    time.time(),
         })
 
     def _run_safe(self):
@@ -459,9 +514,10 @@ class SpeechEngine:
             return ""
         # Skip nearly-silent buffers — Whisper hallucinates initial_prompt words on silence
         rms = float(np.sqrt(np.mean(audio_f32 ** 2)))
-        if rms < 0.004:
+        if rms < 0.006:
             return ""
         try:
+            prompt = getattr(self, "_initial_prompt", None)
             segments, _ = whisper_model.transcribe(
                 audio_f32,
                 language                   = language,   # None = auto-detect (mixed mode)
@@ -469,15 +525,23 @@ class SpeechEngine:
                 beam_size                  = 5,
                 vad_filter                 = False,      # we handle VAD ourselves
                 word_timestamps            = False,
-                initial_prompt             = getattr(self, "_initial_prompt", None),
+                initial_prompt             = prompt,
                 condition_on_previous_text = False,      # prevent context bleeding between sessions
+                # 内置静音判定：no_speech 高且 logprob 差时跳过片段，减轻 initial_prompt 复述
+                no_speech_threshold        = 0.45,
+                log_prob_threshold         = -0.85,
             )
-            # Filter out segments where Whisper itself is not confident it heard speech
+            # no_speech_prob 高 ≈ 模型认为更像静音/噪声
+            _ASR_MAX_NS = 0.48
             parts = []
             for seg in segments:
-                if getattr(seg, "no_speech_prob", 0.0) < 0.6:
+                if getattr(seg, "no_speech_prob", 0.0) < _ASR_MAX_NS:
                     parts.append(seg.text)
-            return "".join(parts).strip()
+            merged = "".join(parts).strip()
+            # 仍有少量「整段读出 initial_prompt」——多为复述提示词而非人声
+            if prompt and _text_echoes_initial_prompt(merged, prompt):
+                return ""
+            return merged
         except Exception as exc:
             logger.warning(f"Whisper inference error: {exc}")
             return ""
@@ -504,6 +568,10 @@ class SpeechEngine:
         """Load (or reuse cached) Whisper model and wake word detector.
         Called by preload() at server startup and by _run() on every start().
         The second and subsequent calls are nearly instant thanks to caching."""
+        with self._preload_lock:
+            self._ensure_models_loaded_unlocked()
+
+    def _ensure_models_loaded_unlocked(self):
         cfg_whisper = self.config.get("whisper", {})
         cfg_ww      = self.config["wake_word"]
 
@@ -784,6 +852,9 @@ class SpeechEngine:
                             # Check timeout even when queue is empty
                             if (self.state == EngineState.LISTENING
                                     and listen_start is not None):
+                                (language, max_silence_ms, max_listen_ms,
+                                 partial_interval_ms, vad_cooldown_ms,
+                                 vad_min_speech_ms, min_listen_ms) = _wparams()
                                 if (time.time() - listen_start) * 1000 >= max_listen_ms:
                                     self._finalize(asr_model, listen_buf, language, "timeout")
                                     listen_buf    = []
@@ -796,6 +867,11 @@ class SpeechEngine:
                                     self._set_state(EngineState.IDLE)
                             continue
 
+                        # 每帧重读 config，使 WebSocket 修改的静音/时长参数在本轮录音中立即生效
+                        (language, max_silence_ms, max_listen_ms,
+                         partial_interval_ms, vad_cooldown_ms,
+                         vad_min_speech_ms, min_listen_ms) = _wparams()
+
                         audio_np = np.frombuffer(audio_bytes, dtype=np.int16)
                         rms = float(
                             np.sqrt(np.mean(audio_np.astype(np.float32) ** 2))
@@ -806,11 +882,6 @@ class SpeechEngine:
 
                             if self._trigger_listen.is_set():
                                 self._trigger_listen.clear()
-                                # Refresh all session params — picks up any runtime
-                                # config changes made via the WebSocket "config" cmd
-                                (language, max_silence_ms, max_listen_ms,
-                                 partial_interval_ms, vad_cooldown_ms,
-                                 vad_min_speech_ms, min_listen_ms) = _wparams()
                                 listen_buf    = [audio_bytes]
                                 listen_start  = time.time()
                                 silence_start = None
@@ -845,10 +916,6 @@ class SpeechEngine:
                                         "event": "wake_word", "keyword": detected,
                                         "score": 1.0, "ts": time.time(),
                                     })
-                                    # Refresh session params on every new session
-                                    (language, max_silence_ms, max_listen_ms,
-                                     partial_interval_ms, vad_cooldown_ms,
-                                     vad_min_speech_ms, min_listen_ms) = _wparams()
                                     listen_buf    = []
                                     listen_start  = time.time()
                                     silence_start = None
@@ -868,9 +935,6 @@ class SpeechEngine:
                                     elif (now - _vad_speech_since) * 1000 >= vad_min_speech_ms:
                                         _vad_speech_since   = None
                                         _vad_cooldown_until = 0.0
-                                        (language, max_silence_ms, max_listen_ms,
-                                         partial_interval_ms, vad_cooldown_ms,
-                                         vad_min_speech_ms, min_listen_ms) = _wparams()
                                         listen_buf    = [audio_bytes]
                                         listen_start  = time.time()
                                         silence_start = None

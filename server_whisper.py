@@ -53,7 +53,7 @@ from typing import Optional, Set
 import websockets
 from websockets.server import WebSocketServerProtocol
 
-from engine_whisper import SpeechEngine, EngineState
+from engine_whisper import SpeechEngine
 
 # Windows: use Selector event loop for proper Ctrl+C delivery
 if sys.platform == "win32":
@@ -247,14 +247,22 @@ class SpeechServer:
             ok    = self.engine.update_config(key, value)
             if ok:
                 save_config(self.config)
-                # wake_word config changed: rebuild detector in background
-                # so change takes effect immediately (no restart needed)
-                if key.startswith("wake_word.") and self.engine.state in (
-                    EngineState.STOPPED, EngineState.IDLE
-                ):
-                    loop = self.loop
-                    engine = self.engine
-                    asyncio.create_task(loop.run_in_executor(None, engine.preload))
+                # wake_word.* 变更后异步 preload（勿用 create_task(run_in_executor(..))：
+                # run_in_executor 返回 Future，create_task 只接受协程，会 TypeError 导致整条连接被断开）
+                if key.startswith("wake_word.") and self.loop:
+                    eng = self.engine
+
+                    async def _preload_after_wake():
+                        try:
+                            await asyncio.get_running_loop().run_in_executor(
+                                None, eng.preload
+                            )
+                        except Exception as exc:
+                            self.logger.exception(
+                                "preload failed after wake_word config: %s", exc
+                            )
+
+                    asyncio.create_task(_preload_after_wake())
             await ws.send(json.dumps({
                 "event": "config_updated" if ok else "error",
                 "code":  None if ok else "invalid_key",
@@ -272,12 +280,18 @@ class SpeechServer:
             }))
 
     def _status_event(self) -> dict:
+        ww = self.config["wake_word"]
+        w  = self.config.get("whisper", {})
         return {
-            "event":             "status",
-            "state":             self.engine.state.value,
-            "wake_word_enabled": self.config["wake_word"]["enabled"],
-            "keywords":          self.config["wake_word"].get("keywords", []),
-            "ts":                time.time(),
+            "event":                  "status",
+            "state":                  self.engine.state.value,
+            "wake_word_enabled":      ww.get("enabled", True),
+            "keywords":               ww.get("keywords", []),
+            "mode":                   ww.get("mode", "auto"),
+            "whisper_max_silence_ms": w.get("max_silence_ms", 2500),
+            "whisper_min_listen_ms":  w.get("min_listen_ms", 600),
+            "whisper_max_listen_ms":  w.get("max_listen_ms", 30000),
+            "ts":                     time.time(),
         }
 
     # ── Server lifecycle ──────────────────────────────────────────────────────

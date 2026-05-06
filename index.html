@@ -341,7 +341,7 @@
   <div class="card conn-bar">
     <div class="dot" id="dot"></div>
     <input id="wsUrl" type="text" value="ws://127.0.0.1:8765" spellcheck="false">
-    <button class="btn btn-primary btn-connect" id="btnConnect" onclick="toggleConnect()">连接</button>
+    <button type="button" class="btn btn-primary btn-connect" id="btnConnect" onclick="toggleConnect()">连接</button>
   </div>
 
   <!-- Left panel -->
@@ -367,13 +367,13 @@
 
       <div class="btn-group">
         <div class="btn-row">
-          <button class="btn btn-success" id="btnStart"  onclick="sendCmd('start')"  disabled>&#9654; 启动</button>
-          <button class="btn btn-danger"  id="btnStop"   onclick="sendCmd('stop')"   disabled>&#9632; 停止</button>
+          <button type="button" class="btn btn-success" id="btnStart"  onclick="sendCmd('start')"  disabled>&#9654; 启动</button>
+          <button type="button" class="btn btn-danger"  id="btnStop"   onclick="sendCmd('stop')"   disabled>&#9632; 停止</button>
         </div>
-        <button class="btn btn-primary" id="btnListen" onclick="sendCmd('listen')" disabled>
+        <button type="button" class="btn btn-primary" id="btnListen" onclick="sendCmd('listen')" disabled>
           &#127908; 手动触发录音
         </button>
-        <button class="btn btn-ghost"   id="btnCancel" onclick="sendCmd('cancel')" disabled>
+        <button type="button" class="btn btn-ghost"   id="btnCancel" onclick="sendCmd('cancel')" disabled>
           &#10005; 取消录音
         </button>
       </div>
@@ -397,11 +397,12 @@
 
       <div class="config-row">
         <label>唤醒词</label>
-        <input type="text" id="cfgKeyword" value="小智" placeholder="小智 或 hey jarvis">
-        <button class="btn btn-ghost btn-sm" onclick="applyKeyword()">应用</button>
+        <input type="text" id="cfgKeyword" value="小智" placeholder="小智 或 hey jarvis"
+               onkeydown="keywordEnterApply(event)">
+        <button type="button" class="btn btn-ghost btn-sm" onclick="applyKeyword()">应用</button>
       </div>
       <div class="config-hint" style="border-color:var(--border)">
-        多个词用英文逗号分隔：<code style="color:var(--primary)">小智,开始录音</code>
+        多个词用英文逗号分隔：<code style="color:var(--primary)">小智,开始录音</code>；点「应用」或在此框按 Enter 即可下发，<strong>无需断开 WebSocket</strong>。
       </div>
 
       <div class="config-row" style="align-items:flex-start">
@@ -464,21 +465,34 @@
         <label>静音超时</label>
         <input type="number" id="cfgSilence" value="2500" min="500" max="8000" step="100">
         <span style="font-size:.75rem;color:var(--muted)">ms</span>
-        <button class="btn btn-ghost btn-sm" onclick="applySilenceMs()">应用</button>
+        <button type="button" class="btn btn-ghost btn-sm" onclick="applySilenceMs()">应用</button>
       </div>
 
       <div class="config-row">
         <label>最短录音</label>
         <input type="number" id="cfgMinListen" value="600" min="100" max="3000" step="100">
         <span style="font-size:.75rem;color:var(--muted)">ms</span>
-        <button class="btn btn-ghost btn-sm" onclick="applyMinListenMs()">应用</button>
+        <button type="button" class="btn btn-ghost btn-sm" onclick="applyMinListenMs()">应用</button>
+      </div>
+
+      <div class="config-row">
+        <label>单段最长</label>
+        <input type="number" id="cfgMaxListen" value="30000" min="3000" max="120000" step="1000">
+        <span style="font-size:.75rem;color:var(--muted)">ms</span>
+        <button type="button" class="btn btn-ghost btn-sm" onclick="applyMaxListenMs()">应用</button>
+      </div>
+
+      <div class="config-hint" style="border-color:var(--border);margin:-4px 0 8px">
+        静音超时 / 最短录音 / 单段最长 对应 <code style="color:var(--primary)">whisper.max_silence_ms</code>、
+        <code style="color:var(--primary)">min_listen_ms</code>、<code style="color:var(--primary)">max_listen_ms</code>；
+        点「应用」后立即写入服务端并在<strong>当前或下一轮录音</strong>生效，无需断开 WebSocket。
       </div>
 
       <div class="config-row">
         <label>实时预览</label>
         <input type="number" id="cfgPartial" value="2000" min="0" max="5000" step="500">
         <span style="font-size:.75rem;color:var(--muted)">ms（0=关）</span>
-        <button class="btn btn-ghost btn-sm" onclick="applyPartialMs()">应用</button>
+        <button type="button" class="btn btn-ghost btn-sm" onclick="applyPartialMs()">应用</button>
       </div>
 
       <div class="config-row" style="align-items:flex-start">
@@ -488,7 +502,7 @@
                  border-radius:5px;padding:5px 8px;color:var(--text);font-size:.78rem;
                  resize:vertical;outline:none;"
           placeholder="引导Whisper识别风格，留空则不使用"></textarea>
-        <button class="btn btn-ghost btn-sm" style="align-self:flex-start;margin-left:4px"
+        <button type="button" class="btn btn-ghost btn-sm" style="align-self:flex-start;margin-left:4px"
                 onclick="applyPrompt()">应用</button>
       </div>
       <div class="config-hint" style="border-color:var(--border)">
@@ -501,7 +515,7 @@
     <div class="card">
       <div class="card-title" style="display:flex;align-items:center;justify-content:space-between;">
         <span>环境检测</span>
-        <button class="btn btn-ghost btn-sm" id="btnCheck" onclick="checkEnv()">&#128269; 检测</button>
+        <button type="button" class="btn btn-ghost btn-sm" id="btnCheck" onclick="checkEnv()">&#128269; 检测</button>
       </div>
       <ul class="env-check-list" id="envList">
         <li style="color:var(--muted);font-size:.8rem;padding:4px 0">
@@ -521,8 +535,8 @@
       <div class="scroll-anchor" id="scrollAnchor"></div>
     </div>
     <div class="transcript-actions">
-      <button class="btn btn-ghost btn-sm" onclick="copyTranscripts()">&#128203; 复制全部</button>
-      <button class="btn btn-ghost btn-sm" onclick="clearTranscripts()">&#128465; 清空</button>
+      <button type="button" class="btn btn-ghost btn-sm" onclick="copyTranscripts()">&#128203; 复制全部</button>
+      <button type="button" class="btn btn-ghost btn-sm" onclick="clearTranscripts()">&#128465; 清空</button>
     </div>
 
     <div class="card-title" style="margin-top:12px;">事件日志</div>
@@ -531,7 +545,7 @@
     <div class="raw-row" style="margin-top:8px;">
       <input id="rawCmd" type="text" placeholder='原始 JSON，如 {"cmd":"status"}'
              onkeydown="if(event.key==='Enter')sendRaw()">
-      <button class="btn btn-ghost btn-sm" onclick="sendRaw()">发送</button>
+      <button type="button" class="btn btn-ghost btn-sm" onclick="sendRaw()">发送</button>
     </div>
   </div>
 
@@ -539,9 +553,18 @@
 
 <script>
   // ── State ─────────────────────────────────────────────────────────────────────
+  const LS_KEYWORDS = 'speechreco_wake_keywords';
   let ws = null;
   let engineState = 'stopped';
   let transcripts = [];
+
+  (function restoreKeywordsFromStorage() {
+    try {
+      const s = localStorage.getItem(LS_KEYWORDS);
+      if (s !== null && document.getElementById('cfgKeyword'))
+        document.getElementById('cfgKeyword').value = s;
+    } catch (_) {}
+  })();
 
   // ── Connect / disconnect ──────────────────────────────────────────────────────
   function toggleConnect() {
@@ -625,12 +648,19 @@
     el.className = 'config-hint hint-' + (hints[mode] ? mode : 'auto');
   }
 
+  function keywordEnterApply(ev) {
+    if (ev.key !== 'Enter') return;
+    ev.preventDefault();
+    applyKeyword();
+  }
+
   function applyKeyword() {
     const raw = document.getElementById('cfgKeyword').value.trim();
     if (!raw) return;
     const kws = raw.split(',').map(s => s.trim()).filter(Boolean);
     send({ cmd: 'config', key: 'wake_word.keywords', value: kws });
-    logEvent('system', '唤醒词已更新: ' + kws.join(', ') + '（立即生效）');
+    try { localStorage.setItem(LS_KEYWORDS, raw); } catch (_) {}
+    logEvent('system', '唤醒词已更新: ' + kws.join(', ') + '（已保存并重建检测器，连接保持）');
   }
 
   function sendConfigBool(key, value) { send({ cmd: 'config', key, value }); }
@@ -643,6 +673,11 @@
   function applyMinListenMs() {
     const v = parseInt(document.getElementById('cfgMinListen').value, 10);
     send({ cmd: 'config', key: 'whisper.min_listen_ms', value: v });
+  }
+
+  function applyMaxListenMs() {
+    const v = parseInt(document.getElementById('cfgMaxListen').value, 10);
+    send({ cmd: 'config', key: 'whisper.max_listen_ms', value: v });
   }
 
   function applyPartialMs() {
@@ -677,8 +712,20 @@
         if (sel.value !== msg.mode) sel.value = msg.mode;
         updateModeHint(msg.mode);
       }
-      if (msg.keywords && msg.keywords.length)
-        document.getElementById('cfgKeyword').value = msg.keywords.join(', ');
+      if (msg.keywords !== undefined) {
+        document.getElementById('cfgKeyword').value = Array.isArray(msg.keywords)
+          ? msg.keywords.join(', ') : '';
+        try {
+          const t = document.getElementById('cfgKeyword').value.trim();
+          if (t) localStorage.setItem(LS_KEYWORDS, t);
+        } catch (_) {}
+      }
+      if (msg.whisper_max_silence_ms !== undefined)
+        document.getElementById('cfgSilence').value = msg.whisper_max_silence_ms;
+      if (msg.whisper_min_listen_ms !== undefined)
+        document.getElementById('cfgMinListen').value = msg.whisper_min_listen_ms;
+      if (msg.whisper_max_listen_ms !== undefined)
+        document.getElementById('cfgMaxListen').value = msg.whisper_max_listen_ms;
 
     } else if (event === 'wake_word') {
       flashWake(msg.keyword, msg.score);
@@ -699,6 +746,21 @@
 
     } else if (event === 'config_updated') {
       logEvent('system', '配置更新: ' + msg.key + ' = ' + JSON.stringify(msg.value));
+      if (msg.key === 'wake_word.keywords' && msg.value !== undefined) {
+        const el = document.getElementById('cfgKeyword');
+        if (el && Array.isArray(msg.value)) {
+          el.value = msg.value.join(', ');
+          try { localStorage.setItem(LS_KEYWORDS, el.value.trim()); } catch (_) {}
+        }
+      }
+      const wfUi = {
+        'whisper.max_silence_ms': 'cfgSilence',
+        'whisper.min_listen_ms': 'cfgMinListen',
+        'whisper.max_listen_ms': 'cfgMaxListen',
+      };
+      const wfEl = wfUi[msg.key];
+      if (wfEl && msg.value !== undefined && msg.value !== null)
+        document.getElementById(wfEl).value = msg.value;
 
     } else if (event === 'env_check') {
       renderEnvCheck(msg.items || []);
