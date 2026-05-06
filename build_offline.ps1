@@ -1,4 +1,4 @@
-﻿#Requires -Version 5.1
+#Requires -Version 5.1
 <#
 .SYNOPSIS
     离线部署包构建脚本
@@ -588,7 +588,8 @@ setlocal enabledelayedexpansion
 set PYTHONIOENCODING=utf-8
 set PYTHONUTF8=1
 :: 将 HF_HOME 指向包内缓存，禁止联网（模型已离线打包到 models\hf\）
-set HF_HOME=%~dp0models\hf
+:: 路径含空格时必须整段加引号，否则会变成 set HF_HOME=C:\Program 且后续片段被当命令执行
+set "HF_HOME=%~dp0models\hf"
 set HF_HUB_OFFLINE=1
 set HF_DATASETS_OFFLINE=1
 cd /d "%~dp0"
@@ -605,7 +606,7 @@ echo    Whisper 模型: $WhisperModel
 echo    Press Ctrl+C 停止服务
 echo  ================================================
 echo.
-echo y | python\python.exe server_whisper.py
+echo y | "%~dp0python\python.exe" "%~dp0server_whisper.py"
 echo.
 echo 服务已停止。
 pause
@@ -626,7 +627,7 @@ echo    语音识别服务 (Vosk)   端口 8765
 echo    Press Ctrl+C 停止服务
 echo  ================================================
 echo.
-echo y | python\python.exe server.py
+echo y | "%~dp0python\python.exe" "%~dp0server.py"
 echo.
 echo 服务已停止。
 pause
@@ -639,11 +640,11 @@ chcp 65001 >nul
 setlocal
 set PYTHONIOENCODING=utf-8
 set PYTHONUTF8=1
-set HF_HOME=%~dp0models\hf
+set "HF_HOME=%~dp0models\hf"
 set HF_HUB_OFFLINE=1
 cd /d "%~dp0"
 title 环境检测
-python\python.exe check_env.py
+"%~dp0python\python.exe" "%~dp0check_env.py"
 pause
 "@ -Encoding UTF8
 
