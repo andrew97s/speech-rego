@@ -645,6 +645,7 @@ class SpeechEngine:
                         asr_model = WhisperModel(
                             whisper_model_name, device="cpu", compute_type="float32"
                         )
+                        logger.info("[preload] cpu+float32 fallback succeeded.")
                 else:
                     self.emit({
                         "event":   "error",
