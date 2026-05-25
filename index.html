@@ -462,6 +462,13 @@
       </div>
 
       <div class="config-row">
+        <label>唤醒后静默</label>
+        <input type="number" id="cfgPostWakeGrace" value="3000" min="0" max="10000" step="100">
+        <span style="font-size:.75rem;color:var(--muted)">ms</span>
+        <button type="button" class="btn btn-ghost btn-sm" onclick="applyPostWakeGraceMs()">应用</button>
+      </div>
+
+      <div class="config-row">
         <label>静音超时</label>
         <input type="number" id="cfgSilence" value="2500" min="500" max="8000" step="100">
         <span style="font-size:.75rem;color:var(--muted)">ms</span>
@@ -483,9 +490,10 @@
       </div>
 
       <div class="config-hint" style="border-color:var(--border);margin:-4px 0 8px">
+        <strong>唤醒后静默</strong>：命中唤醒词后暂不录入麦克风（避免外放 TTS「我在」进识别）；外放音响建议 3000～4000 ms。<br>
         静音超时 / 最短录音 / 单段最长 对应 <code style="color:var(--primary)">whisper.max_silence_ms</code>、
         <code style="color:var(--primary)">min_listen_ms</code>、<code style="color:var(--primary)">max_listen_ms</code>；
-        点「应用」后立即写入服务端并在<strong>当前或下一轮录音</strong>生效，无需断开 WebSocket。
+        点「应用」后立即生效，<strong>无需重启</strong>或断开 WebSocket。
       </div>
 
       <div class="config-row">
@@ -665,6 +673,13 @@
 
   function sendConfigBool(key, value) { send({ cmd: 'config', key, value }); }
 
+  function applyPostWakeGraceMs() {
+    const v = parseInt(document.getElementById('cfgPostWakeGrace').value, 10);
+    if (Number.isNaN(v) || v < 0) return;
+    send({ cmd: 'config', key: 'whisper.post_wake_grace_ms', value: v });
+    logEvent('system', '唤醒后静默已设为 ' + v + ' ms（下次唤醒起生效，无需重启）');
+  }
+
   function applySilenceMs() {
     const v = parseInt(document.getElementById('cfgSilence').value, 10);
     send({ cmd: 'config', key: 'whisper.max_silence_ms', value: v });
@@ -720,6 +735,8 @@
           if (t) localStorage.setItem(LS_KEYWORDS, t);
         } catch (_) {}
       }
+      if (msg.post_wake_grace_ms !== undefined)
+        document.getElementById('cfgPostWakeGrace').value = msg.post_wake_grace_ms;
       if (msg.whisper_max_silence_ms !== undefined)
         document.getElementById('cfgSilence').value = msg.whisper_max_silence_ms;
       if (msg.whisper_min_listen_ms !== undefined)
@@ -744,6 +761,10 @@
       clearPartial();
       addTranscript(msg.text);
 
+    } else if (event === 'transcript_empty') {
+      clearPartial();
+      logEvent('system', '未识别到有效文字（' + (msg.duration_s || '?') + 's）');
+
     } else if (event === 'config_updated') {
       logEvent('system', '配置更新: ' + msg.key + ' = ' + JSON.stringify(msg.value));
       if (msg.key === 'wake_word.keywords' && msg.value !== undefined) {
@@ -754,6 +775,8 @@
         }
       }
       const wfUi = {
+        'whisper.post_wake_grace_ms': 'cfgPostWakeGrace',
+        'postprocess.post_wake_grace_ms': 'cfgPostWakeGrace',
         'whisper.max_silence_ms': 'cfgSilence',
         'whisper.min_listen_ms': 'cfgMinListen',
         'whisper.max_listen_ms': 'cfgMaxListen',
@@ -905,6 +928,7 @@
       case 'listening_end':   return 'listening_end [' + msg.reason + ']';
       case 'partial':         return 'partial: ' + msg.text;
       case 'transcript':      return 'transcript: "' + msg.text + '"';
+      case 'transcript_empty': return 'transcript_empty (' + (msg.duration_s || '?') + 's)';
       case 'ack':             return 'ack: ' + msg.cmd;
       case 'config_updated':  return 'config_updated: ' + msg.key + ' = ' + JSON.stringify(msg.value);
       case 'error':           return 'error [' + msg.code + ']: ' + (msg.message || '');

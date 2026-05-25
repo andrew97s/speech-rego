@@ -25,6 +25,10 @@ from typing import Callable, List, Optional
 
 import numpy as np
 
+from text_postprocess import get_postprocess_config, postprocess_transcript
+from wake_detectors import VoskWakeWordDetector
+from wake_word_match import get_wake_word_options
+
 logger = logging.getLogger(__name__)
 
 _DEVICE_RETRY_SEC = 3.0   # seconds between mic open retries
@@ -42,45 +46,6 @@ def _resolve_mode(mode: str, keywords: List[str]) -> str:
     if mode != "auto":
         return mode
     return "vosk"   # engine.py only supports vosk wake word
-
-
-# ── Wake word detectors ────────────────────────────────────────────────────────
-
-class _VoskWakeWordDetector:
-    def __init__(self, model, sample_rate: int, keywords: List[str]):
-        self._model = model
-        self._sample_rate = sample_rate
-        self.keywords = [kw.strip() for kw in keywords]
-        self._make_rec()
-        logger.info(f"[WakeWord] Vosk mode -- keywords: {self.keywords}")
-
-    @staticmethod
-    def _to_grammar_phrase(kw: str) -> str:
-        """Vosk Chinese models are character-level; separate each CJK char with a
-        space so the recognizer can match multi-character keywords correctly."""
-        if _has_cjk(kw):
-            return " ".join(kw)
-        return kw
-
-    def _make_rec(self):
-        import vosk
-        phrases = [self._to_grammar_phrase(kw) for kw in self.keywords]
-        grammar = json.dumps(phrases + ["[unk]"], ensure_ascii=False)
-        self._rec = vosk.KaldiRecognizer(self._model, self._sample_rate)
-        self._rec.SetGrammar(grammar)
-
-    def process(self, audio_bytes: bytes) -> Optional[str]:
-        if self._rec.AcceptWaveform(audio_bytes):
-            result = json.loads(self._rec.Result())
-            text = result.get("text", "").strip()
-            # Vosk returns space-separated chars for Chinese; strip spaces before
-            # comparing against the original (no-space) keyword strings.
-            normalized = text.replace(" ", "")
-            if normalized and normalized != "[unk]" and normalized in self.keywords:
-                self._make_rec()
-                return normalized
-        return None
-
 
 
 # ── Engine state ───────────────────────────────────────────────────────────────
@@ -104,6 +69,8 @@ class SpeechEngine:
         self._trigger_listen = threading.Event()
         self._cancel_listen  = threading.Event()
         self._thread: Optional[threading.Thread] = None
+        self._suppress_input_until: float = 0.0
+        self._ww_detector: Optional[object] = None
 
     # ── Public control API ────────────────────────────────────────────────────
 
@@ -131,6 +98,14 @@ class SpeechEngine:
     def cancel_listen(self):
         self._cancel_listen.set()
 
+    def suppress_input(self, duration_ms: int = 1500):
+        ms = max(0, int(duration_ms))
+        self._suppress_input_until = time.time() + ms / 1000.0
+        logger.debug(f"Input suppressed for {ms} ms")
+
+    def _postprocess_text(self, text: str) -> str:
+        return postprocess_transcript(text, get_postprocess_config(self.config))
+
     def update_config(self, key: str, value) -> bool:
         try:
             parts = key.split(".")
@@ -147,7 +122,13 @@ class SpeechEngine:
     # ── Internal helpers ──────────────────────────────────────────────────────
 
     def _set_state(self, state: EngineState):
+        prev = self.state
         self.state = state
+        if state == EngineState.IDLE and prev == EngineState.LISTENING:
+            det = self._ww_detector
+            if det is not None and hasattr(det, "reset"):
+                det.reset()
+                logger.debug("[WakeWord] detector reset (back to idle after listening)")
         ww = self.config["wake_word"]
         self.emit({
             "event":             "status",
@@ -205,7 +186,8 @@ class SpeechEngine:
 
         # ── Build wake word detector (once) ──────────────────────────────────
         ww_enabled:    bool      = cfg_ww.get("enabled", True)
-        keywords:      List[str] = cfg_ww.get("keywords", ["你好小智"])
+        ww_opts                  = get_wake_word_options(cfg_ww)
+        keywords:      List[str] = ww_opts["keywords"]
         sensitivity:   float     = cfg_ww.get("sensitivity", 0.5)
         mode_cfg                 = cfg_ww.get("mode", "auto")
         resolved_mode            = _resolve_mode(mode_cfg, keywords)
@@ -214,10 +196,29 @@ class SpeechEngine:
         if ww_enabled and keywords:
             try:
                 if resolved_mode == "vosk":
-                    ww_detector = _VoskWakeWordDetector(asr_model, sample_rate, keywords)
+                    ww_detector = VoskWakeWordDetector(
+                        asr_model, sample_rate, keywords,
+                        prefixes=ww_opts["prefixes"],
+                        aliases=ww_opts["aliases"],
+                        use_grammar=ww_opts["use_grammar"],
+                        has_cjk=_has_cjk,
+                        sensitivity=sensitivity,
+                        match_partials=ww_opts["match_partials"],
+                        partial_stable_hits=ww_opts["partial_stable_hits"],
+                        wake_max_extra_chars=ww_opts["wake_max_extra_chars"],
+                    )
                 else:
-                    # Only vosk is supported in the Vosk engine
-                    ww_detector = _VoskWakeWordDetector(asr_model, sample_rate, keywords)
+                    ww_detector = VoskWakeWordDetector(
+                        asr_model, sample_rate, keywords,
+                        prefixes=ww_opts["prefixes"],
+                        aliases=ww_opts["aliases"],
+                        use_grammar=ww_opts["use_grammar"],
+                        has_cjk=_has_cjk,
+                        sensitivity=sensitivity,
+                        match_partials=ww_opts["match_partials"],
+                        partial_stable_hits=ww_opts["partial_stable_hits"],
+                        wake_max_extra_chars=ww_opts["wake_max_extra_chars"],
+                    )
                     resolved_mode = "vosk"
             except Exception as exc:
                 logger.warning(f"Wake word init failed: {exc}. Using energy-based VAD.")
@@ -226,6 +227,7 @@ class SpeechEngine:
                     "message": str(exc), "ts": time.time(),
                 })
                 ww_enabled = False
+        self._ww_detector = ww_detector
 
         logger.info(
             f"Wake word: {'enabled' if ww_enabled else 'disabled'}"
@@ -297,6 +299,7 @@ class SpeechEngine:
                     asr_rec      = new_asr_rec()
                     listen_start: Optional[float] = None
                     last_partial  = ""
+                    _input_grace_until: float = 0.0
 
                     while not self._stop_event.is_set():
 
@@ -320,6 +323,9 @@ class SpeechEngine:
                             continue
 
                         audio_np = np.frombuffer(audio_bytes, dtype=np.int16)
+                        rms = float(
+                            np.sqrt(np.mean(audio_np.astype(np.float32) ** 2))
+                        ) / 32768.0
 
                         # ── IDLE ──────────────────────────────────────────────
                         if self.state == EngineState.IDLE:
@@ -337,11 +343,9 @@ class SpeechEngine:
                                 continue
 
                             if ww_enabled and ww_detector is not None:
-                                if resolved_mode == "vosk":
-                                    detected = ww_detector.process(audio_bytes)
-                                else:
-                                    audio_f32 = audio_np.astype(np.float32) / 32768.0
-                                    detected  = ww_detector.process(audio_f32)
+                                detected = ww_detector.process(
+                                    audio_bytes, energy_threshold
+                                )
 
                                 if detected:
                                     logger.info(f"Wake word: '{detected}'")
@@ -352,6 +356,11 @@ class SpeechEngine:
                                     asr_rec      = new_asr_rec()
                                     listen_start = time.time()
                                     last_partial = ""
+                                    _pp = get_postprocess_config(self.config)
+                                    grace_ms = int(_pp.get("post_wake_grace_ms", 1500))
+                                    _input_grace_until = (
+                                        time.time() + grace_ms / 1000.0
+                                    )
                                     self.emit({
                                         "event": "listening_start",
                                         "trigger": "wake_word", "ts": time.time(),
@@ -375,6 +384,11 @@ class SpeechEngine:
 
                         # ── LISTENING ─────────────────────────────────────────
                         elif self.state == EngineState.LISTENING:
+
+                            _now = time.time()
+                            if (_now < _input_grace_until
+                                    or _now < self._suppress_input_until):
+                                continue
 
                             if self._cancel_listen.is_set():
                                 self._cancel_listen.clear()
@@ -400,13 +414,16 @@ class SpeechEngine:
 
                             if asr_rec.AcceptWaveform(audio_bytes):
                                 result = json.loads(asr_rec.Result())
-                                text   = result.get("text", "").strip()
+                                raw    = result.get("text", "").strip()
+                                text   = self._postprocess_text(raw)
                                 if text:
                                     self.emit({
                                         "event": "transcript",
                                         "text": text, "is_final": True,
                                         "ts": time.time(),
                                     })
+                                elif raw:
+                                    logger.debug(f"Transcript suppressed: {raw!r}")
                                 self.emit({
                                     "event": "listening_end",
                                     "reason": "silence", "ts": time.time(),
@@ -416,9 +433,10 @@ class SpeechEngine:
                                 last_partial = ""
                                 self._set_state(EngineState.IDLE)
                             else:
-                                partial = json.loads(
+                                partial_raw = json.loads(
                                     asr_rec.PartialResult()
                                 ).get("partial", "").strip()
+                                partial = self._postprocess_text(partial_raw)
                                 if partial and partial != last_partial:
                                     last_partial = partial
                                     self.emit({
@@ -451,12 +469,15 @@ class SpeechEngine:
 
     def _finalize(self, rec, reason: str):
         try:
-            text = json.loads(rec.FinalResult()).get("text", "").strip()
+            raw  = json.loads(rec.FinalResult()).get("text", "").strip()
+            text = self._postprocess_text(raw)
             if text:
                 self.emit({
                     "event": "transcript",
                     "text": text, "is_final": True, "ts": time.time(),
                 })
+            elif raw:
+                logger.debug(f"Transcript suppressed: {raw!r}")
         except Exception as exc:
             logger.debug(f"Finalize error: {exc}")
         self.emit({"event": "listening_end", "reason": reason, "ts": time.time()})

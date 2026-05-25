@@ -6,3 +6,5 @@ vosk>=0.3.45
 # Whisper STT backend (for server_whisper.py / engine_whisper.py)
 faster-whisper>=1.0.0
 ctranslate2>=4.0.0
+zhconv>=1.4.3
+webrtcvad>=2.0.10

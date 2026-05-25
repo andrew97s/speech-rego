@@ -15,8 +15,19 @@ Client -> Server (JSON):
   {"cmd": "stop"}                            Stop the engine / release mic
   {"cmd": "listen"}                          Manually trigger one listen session
   {"cmd": "cancel"}                          Abort current listen session
+  {"cmd": "suppress_input", "duration_ms": 1500}  Ignore mic while client plays TTS
   {"cmd": "status"}                          Request current status
   {"cmd": "config", "key": "k", "value": v}  Update a config value at runtime
+                                              (e.g. auto_stop_without_clients_ms)
+
+Server config (config.json):
+  auto_stop_without_clients_ms  After last WS client disconnects, stop engine
+                                and release mic if still no clients (ms); 0=off
+                                              (e.g. auto_stop_without_clients_ms)
+
+Top-level config (config.json):
+  auto_stop_without_clients_ms  After last WS client disconnects, stop engine
+                                and release mic if still running (0 = disabled).
 
 Server -> Client (JSON):
   {"event": "status",          "state": "stopped|no_device|idle|listening", ...}
@@ -53,7 +64,8 @@ from typing import Optional, Set
 import websockets
 from websockets.server import WebSocketServerProtocol
 
-from engine_whisper import SpeechEngine
+from engine_whisper import EngineState, SpeechEngine
+from text_postprocess import get_postprocess_config
 
 # Windows: use Selector event loop for proper Ctrl+C delivery
 if sys.platform == "win32":
@@ -69,7 +81,13 @@ _DEFAULTS: dict = {
         "enabled":     True,
         "mode":        "whisper",   # whisper mode needs no extra dependencies
         "keywords":    ["小智"],
+        "prefixes":    ["你好", "嗨", "hi", "hey", "喂", "哎"],
+        "aliases":     [],
+        "use_grammar": False,
         "sensitivity": 0.5,
+        "match_partials": False,
+        "partial_stable_hits": 2,
+        "wake_max_extra_chars": 1,
     },
     "asr": {
         # Used only for Vosk wake-word model path (if wake_word.mode = "vosk")
@@ -80,22 +98,50 @@ _DEFAULTS: dict = {
         "language":            None,   # None = auto-detect (mixed Chinese/English)
         "device":              "cpu",
         "compute_type":        "int8",
-        "partial_interval_ms": 2000,
-        "max_silence_ms":      2500,   # ms of silence to end session (2500 = natural pause)
+        "partial_interval_ms": 0,
+        "verbatim":            True,
+        "verbatim_initial_prompt": (
+            "以下是普通话口语的逐字转写。请完整保留说话人的原话，"
+            "不要改写、不要概括、不要省略、不要改成问句或列表。"
+        ),
+        "temperature":         0,
+        "max_silence_ms":      2000,
+        "silence_mode":        "webrtcvad",  # webrtcvad | energy
+        "webrtcvad_aggressiveness": 3,
+        "webrtcvad_speech_fraction": 0.2,
+        "vad_rms_gate": True,
+        "vad_rms_min": 0.01,
+        "vad_rms_peak_ratio": 0.25,
+        "vad_rms_energy_mult": 0.55,
+        "vad_rms_buffer_gate": False,
+        "silence_near_field_ratio": 0.25,
+        "silence_speech_ratio": 0.12,
+        "silence_end_ratio":    0.20,
         "max_listen_ms":       30000,
         "vad_cooldown_ms":     500,
         "vad_min_speech_ms":   200,
         "min_listen_ms":       600,    # min recording before silence-end can fire
         "initial_prompt":      None,   # e.g. "以下是普通话，包含中文、数字和英文字母。"
+        "post_wake_grace_ms":  3000,   # after wake word, ignore mic (TTS echo; use longer with speakers)
+        "output_simplified":   True,   # convert traditional -> simplified Chinese
+    },
+    "postprocess": {
+        "output_simplified":   True,
+        "post_wake_grace_ms":  3000,
+        "suppress_phrases":    ["我在", "在呢", "我在呢", "嗯", "啊", "好的"],
     },
     "audio": {
         "device":           None,
         "sample_rate":      16000,   # ignored for Whisper (always 16 kHz)
         "chunk_size":       4000,
         "energy_threshold": 0.02,
+        "input_channels":   1,      # set 2 for stereo mics; downmixed before ASR
+        "stereo_mode":      "mix",  # mix | left | right
     },
     "log_level": "INFO",
     "http_port": 8080,   # 0 = disabled; serve index.html on this port
+    # 无 WebSocket 客户端连接超过该时长(ms)后自动 engine.stop() 释放麦克风；0=关闭
+    "auto_stop_without_clients_ms": 60000,
 }
 
 
@@ -155,6 +201,44 @@ class SpeechServer:
         self.loop:    Optional[asyncio.AbstractEventLoop] = None
         self.engine  = SpeechEngine(config, self._on_engine_event)
         self.logger  = logging.getLogger("SpeechServer-Whisper")
+        self._no_clients_since: Optional[float] = None
+
+    def _auto_stop_ms(self) -> int:
+        return max(0, int(self.config.get("auto_stop_without_clients_ms", 0)))
+
+    def _update_server_config(self, key: str, value) -> bool:
+        if key == "auto_stop_without_clients_ms":
+            self.config[key] = max(0, int(float(value)))
+            self.logger.info(
+                "Config updated: auto_stop_without_clients_ms = %d",
+                self.config[key],
+            )
+            return True
+        return False
+
+    async def _tick_auto_stop_without_clients(self) -> None:
+        """Stop engine when no WS clients remain connected for configured duration."""
+        ms = self._auto_stop_ms()
+        if ms <= 0:
+            self._no_clients_since = None
+            return
+        if self.clients:
+            self._no_clients_since = None
+            return
+        if self.engine.state == EngineState.STOPPED:
+            self._no_clients_since = None
+            return
+        now = time.time()
+        if self._no_clients_since is None:
+            self._no_clients_since = now
+            return
+        if (now - self._no_clients_since) * 1000 >= ms:
+            self.logger.info(
+                "No WebSocket clients for %d ms — stopping engine (microphone released)",
+                ms,
+            )
+            self.engine.stop()
+            self._no_clients_since = None
 
     # ── Engine -> broadcast ───────────────────────────────────────────────────
 
@@ -180,6 +264,7 @@ class SpeechServer:
         addr = websocket.remote_address
         self.logger.info(f"Client connected: {addr}")
         self.clients.add(websocket)
+        self._no_clients_since = None
         await websocket.send(json.dumps(self._status_event()))
         try:
             async for raw in websocket:
@@ -189,6 +274,10 @@ class SpeechServer:
         finally:
             self.clients.discard(websocket)
             self.logger.info(f"Client disconnected: {addr}")
+            if (not self.clients
+                    and self.engine.state != EngineState.STOPPED
+                    and self._auto_stop_ms() > 0):
+                self._no_clients_since = time.time()
 
     async def _dispatch(self, ws: WebSocketServerProtocol, raw: str):
         try:
@@ -220,6 +309,13 @@ class SpeechServer:
             self.engine.cancel_listen()
             await ws.send(json.dumps({"event": "ack", "cmd": "cancel", "ts": ts}))
 
+        elif cmd == "suppress_input":
+            duration_ms = int(msg.get("duration_ms", 1500))
+            self.engine.suppress_input(duration_ms)
+            await ws.send(json.dumps({
+                "event": "ack", "cmd": "suppress_input", "duration_ms": duration_ms, "ts": ts,
+            }))
+
         elif cmd == "check":
             # Run env check in a thread; results sent back as "env_check" event
             async def _run_check(ws=ws, ts=ts):
@@ -245,6 +341,8 @@ class SpeechServer:
             key   = msg.get("key", "")
             value = msg.get("value")
             ok    = self.engine.update_config(key, value)
+            if not ok:
+                ok = self._update_server_config(key, value)
             if ok:
                 save_config(self.config)
                 # wake_word.* 变更后异步 preload（勿用 create_task(run_in_executor(..))：
@@ -282,6 +380,7 @@ class SpeechServer:
     def _status_event(self) -> dict:
         ww = self.config["wake_word"]
         w  = self.config.get("whisper", {})
+        _pp = get_postprocess_config(self.config)
         return {
             "event":                  "status",
             "state":                  self.engine.state.value,
@@ -291,6 +390,8 @@ class SpeechServer:
             "whisper_max_silence_ms": w.get("max_silence_ms", 2500),
             "whisper_min_listen_ms":  w.get("min_listen_ms", 600),
             "whisper_max_listen_ms":  w.get("max_listen_ms", 30000),
+            "post_wake_grace_ms":     int(_pp.get("post_wake_grace_ms", 1500)),
+            "auto_stop_without_clients_ms": self._auto_stop_ms(),
             "ts":                     time.time(),
         }
 
@@ -319,6 +420,13 @@ class SpeechServer:
         http_port = self.config.get("http_port", 8080)
         if http_port:
             self.logger.info(f"  UI         : http://127.0.0.1:{http_port}/index.html")
+        idle_ms = self._auto_stop_ms()
+        if idle_ms > 0:
+            self.logger.info(
+                f"  Auto-stop  : no WS clients for {idle_ms} ms -> release microphone"
+            )
+        else:
+            self.logger.info("  Auto-stop  : disabled (auto_stop_without_clients_ms=0)")
         self.logger.info(border)
 
         # Pre-load Whisper model + wake word detector before accepting connections
@@ -340,6 +448,7 @@ class SpeechServer:
                     "Ctrl+C to stop."
                 )
                 while True:
+                    await self._tick_auto_stop_without_clients()
                     await asyncio.sleep(0.5)
         except (asyncio.CancelledError, KeyboardInterrupt):
             pass

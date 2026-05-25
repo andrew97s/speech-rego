@@ -9,6 +9,7 @@ Client -> Server (JSON):
   {"cmd": "stop"}                            Stop the engine / release mic
   {"cmd": "listen"}                          Manually trigger one listen session
   {"cmd": "cancel"}                          Abort current listen session
+  {"cmd": "suppress_input", "duration_ms": 1500}  Ignore mic while client plays TTS
   {"cmd": "status"}                          Request current status
   {"cmd": "config", "key": "k", "value": v}  Update a config value at runtime
 
@@ -49,6 +50,9 @@ _DEFAULTS: dict = {
     "wake_word": {
         "enabled": True,
         "keywords": ["hey_jarvis"],
+        "prefixes": ["你好", "嗨", "hi", "hey"],
+        "aliases": [],
+        "use_grammar": False,
         "sensitivity": 0.5,
     },
     "asr": {
@@ -62,7 +66,13 @@ _DEFAULTS: dict = {
         "chunk_size": 4000,
         "energy_threshold": 0.02,
     },
+    "postprocess": {
+        "output_simplified":   True,
+        "post_wake_grace_ms":  1500,
+        "suppress_phrases":    ["我在", "在呢", "我在呢", "嗯", "啊", "好的"],
+    },
     "log_level": "INFO",
+    "auto_stop_without_clients_ms": 60000,
 }
 
 
@@ -124,6 +134,80 @@ class SpeechServer:
         self.loop: Optional[asyncio.AbstractEventLoop] = None
         self.engine = SpeechEngine(config, self._on_engine_event)
         self.logger = logging.getLogger("SpeechServer")
+        self._no_clients_since: Optional[float] = None
+
+    def _auto_stop_ms(self) -> int:
+        return max(0, int(self.config.get("auto_stop_without_clients_ms", 0)))
+
+    def _update_server_config(self, key: str, value) -> bool:
+        if key == "auto_stop_without_clients_ms":
+            self.config[key] = max(0, int(float(value)))
+            self.logger.info(
+                "Config updated: auto_stop_without_clients_ms = %d",
+                self.config[key],
+            )
+            return True
+        return False
+
+    async def _tick_auto_stop_without_clients(self) -> None:
+        ms = self._auto_stop_ms()
+        if ms <= 0:
+            self._no_clients_since = None
+            return
+        if self.clients:
+            self._no_clients_since = None
+            return
+        if self.engine.state == EngineState.STOPPED:
+            self._no_clients_since = None
+            return
+        now = time.time()
+        if self._no_clients_since is None:
+            self._no_clients_since = now
+            return
+        if (now - self._no_clients_since) * 1000 >= ms:
+            self.logger.info(
+                "No WebSocket clients for %d ms — stopping engine (microphone released)",
+                ms,
+            )
+            self.engine.stop()
+            self._no_clients_since = None
+        self._no_clients_since: Optional[float] = None
+
+    def _auto_stop_ms(self) -> int:
+        return max(0, int(self.config.get("auto_stop_without_clients_ms", 0)))
+
+    def _update_server_config(self, key: str, value) -> bool:
+        if key == "auto_stop_without_clients_ms":
+            self.config[key] = max(0, int(float(value)))
+            self.logger.info(
+                "Config updated: auto_stop_without_clients_ms = %d",
+                self.config[key],
+            )
+            return True
+        return False
+
+    async def _tick_auto_stop_without_clients(self) -> None:
+        ms = self._auto_stop_ms()
+        if ms <= 0:
+            self._no_clients_since = None
+            return
+        if self.clients:
+            self._no_clients_since = None
+            return
+        if self.engine.state == EngineState.STOPPED:
+            self._no_clients_since = None
+            return
+        now = time.time()
+        if self._no_clients_since is None:
+            self._no_clients_since = now
+            return
+        if (now - self._no_clients_since) * 1000 >= ms:
+            self.logger.info(
+                "No WebSocket clients for %d ms — stopping engine (microphone released)",
+                ms,
+            )
+            self.engine.stop()
+            self._no_clients_since = None
 
     # ── Engine -> broadcast ───────────────────────────────────────────────────
 
@@ -149,6 +233,7 @@ class SpeechServer:
         addr = websocket.remote_address
         self.logger.info(f"Client connected: {addr}")
         self.clients.add(websocket)
+        self._no_clients_since = None
         await websocket.send(json.dumps(self._status_event()))
         try:
             async for raw in websocket:
@@ -158,6 +243,10 @@ class SpeechServer:
         finally:
             self.clients.discard(websocket)
             self.logger.info(f"Client disconnected: {addr}")
+            if (not self.clients
+                    and self.engine.state != EngineState.STOPPED
+                    and self._auto_stop_ms() > 0):
+                self._no_clients_since = time.time()
 
     async def _dispatch(self, ws: WebSocketServerProtocol, raw: str):
         try:
@@ -188,6 +277,13 @@ class SpeechServer:
             self.engine.cancel_listen()
             await ws.send(json.dumps({"event": "ack", "cmd": "cancel", "ts": ts}))
 
+        elif cmd == "suppress_input":
+            duration_ms = int(msg.get("duration_ms", 1500))
+            self.engine.suppress_input(duration_ms)
+            await ws.send(json.dumps({
+                "event": "ack", "cmd": "suppress_input", "duration_ms": duration_ms, "ts": ts,
+            }))
+
         elif cmd == "status":
             await ws.send(json.dumps(self._status_event()))
 
@@ -195,6 +291,8 @@ class SpeechServer:
             key   = msg.get("key", "")
             value = msg.get("value")
             ok = self.engine.update_config(key, value)
+            if not ok:
+                ok = self._update_server_config(key, value)
             if ok:
                 save_config(self.config)
             await ws.send(json.dumps({
@@ -219,6 +317,7 @@ class SpeechServer:
             "state":             self.engine.state.value,
             "wake_word_enabled": self.config["wake_word"]["enabled"],
             "keywords":          self.config["wake_word"].get("keywords", []),
+            "auto_stop_without_clients_ms": self._auto_stop_ms(),
             "ts":                time.time(),
         }
 
@@ -242,6 +341,13 @@ class SpeechServer:
         if ww["enabled"]:
             self.logger.info(f"  Keywords  : {', '.join(ww.get('keywords', []))}")
         self.logger.info(f"  ASR model : {self.config['asr']['model_path']}")
+        idle_ms = self._auto_stop_ms()
+        if idle_ms > 0:
+            self.logger.info(
+                f"  Auto-stop  : no WS clients for {idle_ms} ms -> release microphone"
+            )
+        else:
+            self.logger.info("  Auto-stop  : disabled (auto_stop_without_clients_ms=0)")
         self.logger.info(border)
 
         try:
@@ -251,6 +357,7 @@ class SpeechServer:
                 )
                 # Periodically yield so Python's signal handler can run on Windows.
                 while True:
+                    await self._tick_auto_stop_without_clients()
                     await asyncio.sleep(0.5)
         except (asyncio.CancelledError, KeyboardInterrupt):
             pass

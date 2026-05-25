@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
     离线部署包构建脚本
@@ -45,9 +45,12 @@
     输出目录（默认: .\dist\SpeechReco-Offline）
 
 .EXAMPLE
-    .\build_offline.ps1                                  # 最小包（CPU/DML，无 OWW）
-    .\build_offline.ps1 -WhisperModel base -GPU none     # 纯 CPU 最小包
-    .\build_offline.ps1 -GPU cuda -BundleNvidiaCuda $true  # 完整 CUDA 离线包
+    .\build_offline.ps1 -WhisperModel tiny -GPU none -IncludeVosk $false
+        # 约最小体积：CPU + tiny 模型 + 无 Vosk + 自动裁剪 onnxruntime 等
+    .\build_offline.ps1 -WhisperModel small -GPU cuda -BundleNvidiaCuda $true
+        # 目标机 NVIDIA + 完整 CUDA 离线（体积最大）
+    .\build_offline.ps1 -PruneUnusedDeps $false
+        # 保留 pip 拉取的全部依赖（调试用）
     .\build_offline.ps1 -WhisperModel small -GPU cuda -OutputDir D:\deploy
 #>
 
@@ -57,7 +60,8 @@ param(
     [string] $GPU             = "auto",
     [bool]   $IncludeVosk     = $true,
     [bool]   $IncludeOWW      = $false,   # openwakeword 唤醒词（默认关闭；默认用 vosk/whisper 唤醒词，无需额外依赖）
-    [bool]   $BundleNvidiaCuda = $true,  # 是否打包 nvidia-* CUDA 运行库（约 800MB）；false=目标机需自行安装 CUDA Toolkit
+    [bool]   $BundleNvidiaCuda = $false, # 是否打包 nvidia-* CUDA 运行库（约 800MB）；false=目标机需自行安装 CUDA Toolkit
+    [bool]   $PruneUnusedDeps  = $true,  # 构建后卸载 onnxruntime / hf_xet / HF CLI 等运行时不需要的包
     [string] $OutputDir       = ""
 )
 
@@ -71,6 +75,100 @@ function Write-Ok   { param($msg) Write-Host "  [OK] $msg"   -ForegroundColor Gr
 function Write-Warn { param($msg) Write-Host " [!!] $msg"    -ForegroundColor Yellow }
 function Write-Fail { param($msg) Write-Host " [XX] $msg"    -ForegroundColor Red; exit 1 }
 function Write-Info { param($msg) Write-Host "      $msg" }
+
+# cmd.exe cannot run .bat files saved as UTF-8 with BOM; use ASCII + CRLF only.
+function Write-CmdBat {
+    param([string]$Path, [string]$Content)
+    $text = ($Content.TrimEnd() -replace "`r?`n", "`r`n") + "`r`n"
+    $enc  = New-Object System.Text.ASCIIEncoding
+    [System.IO.File]::WriteAllText($Path, $text, $enc)
+}
+
+# webrtcvad has no win_amd64 wheel on PyPI; embed Python lacks Include/Python.h.
+# Build with host Python 3.11 headers + python311.lib, or copy a prebuilt extension.
+function Install-EmbeddedWebRtcVad {
+    param(
+        [string] $PyExe,
+        [string] $PythonDir,
+        [string] $SiteDir
+    )
+
+    $hostVer = $null
+    try {
+        $hostVer = & py -3.11 -c "import sys; print('%d.%d.%d' % sys.version_info[:3])" 2>$null
+    } catch { }
+
+    if (-not $hostVer -or -not ($hostVer -match '^3\.11\.')) {
+        Write-Fail @"
+webrtcvad 需要在本机构建或复制扩展，但找不到 Python 3.11。
+请安装 https://www.python.org/downloads/windows/ （勾选 py launcher），然后重试 build_offline。
+"@
+    }
+
+    $hostPrefix = (& py -3.11 -c "import sys; print(sys.base_prefix)" 2>$null).Trim()
+    $hostInclude = Join-Path $hostPrefix "Include"
+    $hostLibs    = Join-Path $hostPrefix "libs"
+    $pyLib       = Join-Path $hostLibs "python311.lib"
+
+    if (-not (Test-Path (Join-Path $hostInclude "Python.h"))) {
+        Write-Fail "本机 Python 3.11 缺少 Include\Python.h，请重装完整版 Python（非 embed 包）。"
+    }
+
+    $embedLibs = Join-Path $PythonDir "libs"
+    if (-not (Test-Path $embedLibs)) {
+        New-Item -ItemType Directory -Force -Path $embedLibs | Out-Null
+    }
+    if ((Test-Path $pyLib) -and -not (Test-Path (Join-Path $embedLibs "python311.lib"))) {
+        Copy-Item $pyLib (Join-Path $embedLibs "python311.lib") -Force
+        Write-Info "  已复制 python311.lib 到嵌入式 Python（供编译 C 扩展）"
+    }
+
+    Write-Info "  尝试在嵌入式 Python 中编译 webrtcvad（使用本机 3.11 头文件）..."
+    $prevInclude = $env:INCLUDE
+    $env:INCLUDE = "$hostInclude;$prevInclude"
+    $prevEap = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    & $PyExe -m pip install 'webrtcvad>=2.0.10' --no-cache-dir 2>&1 | Out-Null
+    $ErrorActionPreference = $prevEap
+    $env:INCLUDE = $prevInclude
+
+    $pyd = Get-ChildItem $SiteDir -Filter "_webrtcvad*.pyd" -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($LASTEXITCODE -eq 0 -and $pyd) {
+        return
+    }
+
+    Write-Warn "  嵌入式 pip 编译失败，改从本机 Python 3.11 复制 webrtcvad 扩展..."
+    & py -3.11 -m pip install 'webrtcvad>=2.0.10' -q 2>&1 | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        Write-Fail "本机 pip 安装 webrtcvad 失败。请确认已安装 Visual C++ Build Tools 后重试。"
+    }
+
+    $hostSite = (& py -3.11 -c "import webrtcvad, os; print(os.path.dirname(webrtcvad.__file__))" 2>$null).Trim()
+    if (-not $hostSite -or -not (Test-Path $hostSite)) {
+        Write-Fail "无法定位本机 webrtcvad 包路径。"
+    }
+
+    foreach ($name in @("webrtcvad.py")) {
+        $src = Join-Path $hostSite $name
+        if (Test-Path $src) { Copy-Item $src $SiteDir -Force }
+    }
+    Get-ChildItem $hostSite -Filter "_webrtcvad*.pyd" -ErrorAction SilentlyContinue | ForEach-Object {
+        Copy-Item $_.FullName $SiteDir -Force
+    }
+    $hostSiteParent = Split-Path $hostSite -Parent
+    Get-ChildItem $hostSiteParent -Filter "webrtcvad-*.dist-info" -Directory -ErrorAction SilentlyContinue |
+        ForEach-Object {
+            $dest = Join-Path $SiteDir $_.Name
+            if (Test-Path $dest) { Remove-Item $dest -Recurse -Force }
+            Copy-Item $_.FullName $SiteDir -Recurse -Force
+        }
+
+    $pyd = Get-ChildItem $SiteDir -Filter "_webrtcvad*.pyd" -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $pyd) {
+        Write-Fail "复制 webrtcvad 后仍找不到 _webrtcvad*.pyd。"
+    }
+    Write-Info "  已从本机 Python 复制 $($pyd.Name)"
+}
 
 # ── GPU auto-detection ────────────────────────────────────────────────────────
 # Runs before directory creation so detection result is shown in the banner.
@@ -123,6 +221,12 @@ if ($GPU -eq "auto") {
 
     $GPU = $detected
 }
+
+# cuda 离线包默认把 nvidia-cublas 等打进包内；仅当显式传入 -BundleNvidiaCuda $false 时不打包
+if ($GPU -eq "cuda" -and -not $PSBoundParameters.ContainsKey("BundleNvidiaCuda")) {
+    $BundleNvidiaCuda = $true
+}
+
 $ScriptDir  = Split-Path -Parent $MyInvocation.MyCommand.Path
 if (-not $OutputDir) {
     $OutputDir = Join-Path $ScriptDir "dist\SpeechReco-Offline"
@@ -246,7 +350,8 @@ $pkgs = @(
     'numpy>=1.24.0,<2.0.0',
     'faster-whisper>=1.0.0',
     'ctranslate2>=4.0.0',
-    'vosk>=0.3.45'
+    'vosk>=0.3.45',
+    'zhconv>=1.4.3'
 )
 
 foreach ($pkg in $pkgs) {
@@ -256,6 +361,27 @@ foreach ($pkg in $pkgs) {
         Write-Warn "安装 $pkg 时出错（继续）"
     }
 }
+
+# webrtcvad：PyPI 无 Windows wheel；见 Install-EmbeddedWebRtcVad（约 1MB）
+Write-Info "  install webrtcvad (speech end detection)"
+$siteDirEarly = Join-Path $PythonDir "Lib\site-packages"
+Install-EmbeddedWebRtcVad -PyExe $PyExe -PythonDir $PythonDir -SiteDir $siteDirEarly
+$wvCheck = Join-Path $env:TEMP "wv_check_$PID.py"
+@'
+import sys
+sys.path.insert(0, r'__SCRIPT_DIR__')
+from speech_vad import create_webrtc_vad
+assert create_webrtc_vad(2) is not None, "webrtcvad import failed"
+print("webrtcvad ok")
+'@.Replace('__SCRIPT_DIR__', ($ScriptDir -replace '\\', '/')) |
+    Set-Content $wvCheck -Encoding ASCII
+& $PyExe $wvCheck
+if ($LASTEXITCODE -ne 0) {
+    Remove-Item $wvCheck -Force -ErrorAction SilentlyContinue
+    Write-Fail "webrtcvad 已安装但无法 import，请查看上方错误。"
+}
+Remove-Item $wvCheck -Force -ErrorAction SilentlyContinue
+Write-Ok "webrtcvad 已安装并校验"
 
 # openwakeword: 先尝试 --only-binary（最快，无需编译）；
 # 若失败（microvad 等 native dep 无 wheel），回退 --no-deps 只装核心包，VAD 禁用但唤醒词仍可用。
@@ -277,14 +403,16 @@ if ($IncludeOWW) {
     Write-Info "  跳过 openwakeword（IncludeOWW=False）"
 }
 
-# GPU variant of onnxruntime
+# onnxruntime: faster-whisper 元数据依赖，但 speech-rego 使用 vad_filter=False，无需安装（约 350+ MB）
+Write-Info "  跳过 onnxruntime / onnxruntime-gpu（项目未启用 Whisper 内置 VAD）"
+
 switch ($GPU) {
     "cuda" {
         if ($BundleNvidiaCuda) {
             # nvidia-* packages are NOT on Tsinghua mirror — must use official PyPI.
             # Install explicitly so ctranslate2 can find cublas64_12.dll etc.
             # in site-packages\nvidia\*\bin\ at runtime.
-            Write-Info "  安装 CUDA 运行库（从官方 PyPI，约 800 MB）..."
+            Write-Info "  安装 CUDA 运行库（约 800 MB）..."
             $nvPkgs = @(
                 'nvidia-cuda-runtime-cu12',
                 'nvidia-cublas-cu12'
@@ -309,22 +437,9 @@ switch ($GPU) {
             Write-Warn "  目标机器需自行安装 NVIDIA CUDA Toolkit 12："
             Write-Warn "    https://developer.nvidia.com/cuda-downloads"
         }
-        & $PyExe -m pip uninstall onnxruntime -y --quiet 2>&1 | Out-Null
-        Write-Info "  安装 onnxruntime-gpu..."
-        & $PyExe -m pip install 'onnxruntime-gpu>=1.17.0' --prefer-binary
-        if ($LASTEXITCODE -ne 0) {
-            Write-Warn "onnxruntime-gpu install failed, keeping CPU version"
-            & $PyExe -m pip install 'onnxruntime>=1.16.0' --prefer-binary --quiet
-        }
     }
     "dml" {
-        Write-Info "  Installing DirectML support..."
-        & $PyExe -m pip uninstall onnxruntime -y --quiet 2>&1 | Out-Null
-        & $PyExe -m pip install 'onnxruntime-directml>=1.17.0' --prefer-binary --quiet
-        if ($LASTEXITCODE -ne 0) {
-            Write-Warn "onnxruntime-directml install failed, keeping CPU version"
-            & $PyExe -m pip install 'onnxruntime>=1.16.0' --prefer-binary --quiet
-        }
+        Write-Info "  dml 模式：Whisper 推理仍走 ctranslate2；未安装 onnxruntime-directml（本项目不需要）"
     }
 }
 Write-Ok "Python 依赖包安装完成"
@@ -349,19 +464,82 @@ $testDirs = @(Get-ChildItem $siteDir -Include "tests","test" -Recurse -Directory
 foreach ($d in $testDirs) { Remove-Item $d.FullName -Recurse -Force -ErrorAction SilentlyContinue }
 Write-Info "  已删除 $($testDirs.Count) 个测试目录"
 
-# 删除 pip / setuptools / wheel（嵌入式运行时不需要安装工具）
-foreach ($pkg in @("pip", "setuptools", "wheel", "_distutils_hack")) {
+# 卸载 speech-rego 运行时不需要的第三方包（须在删除 pip 之前；最终以删目录为准）
+if ($PruneUnusedDeps) {
+    Write-Info "  裁剪冗余依赖（onnxruntime / HF 下载加速 / CLI 等）..."
+    $pipMod = Join-Path $siteDir "pip"
+    if (Test-Path $pipMod) {
+        $prevEap = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        try {
+            foreach ($pipName in @(
+                    'onnxruntime', 'onnxruntime-gpu', 'onnxruntime-directml',
+                    'hf-xet', 'onnx'
+                )) {
+                & $PyExe -m pip uninstall $pipName -y --quiet 2>&1 | Out-Null
+            }
+        } finally {
+            $ErrorActionPreference = $prevEap
+        }
+    }
+    $pruneDirs = @(
+        'onnxruntime', 'hf_xet', 'typer', 'rich', 'pygments', 'shellingham',
+        'annotated_doc', 'markdown_it', 'mdurl', 'colorama', 'flatbuffers',
+        'google', 'onnx'
+    )
+    foreach ($dirName in $pruneDirs) {
+        $dirPath = Join-Path $siteDir $dirName
+        if (Test-Path $dirPath) {
+            Remove-Item $dirPath -Recurse -Force -ErrorAction SilentlyContinue
+            Write-Info "    已删除目录 $dirName"
+        }
+        Get-ChildItem $siteDir -Filter "$dirName-*.dist-info" -Directory -ErrorAction SilentlyContinue |
+            ForEach-Object { Remove-Item $_.FullName -Recurse -Force -ErrorAction SilentlyContinue }
+    }
+    Get-ChildItem $siteDir -Directory -Filter "onnxruntime*.dist-info" -ErrorAction SilentlyContinue |
+        ForEach-Object { Remove-Item $_.FullName -Recurse -Force -ErrorAction SilentlyContinue }
+    # 验证核心 import
+    $verifyPy = Join-Path $env:TEMP "speech_reco_verify_$PID.py"
+    @'
+import sys
+mods = ("websockets", "sounddevice", "numpy", "faster_whisper", "ctranslate2", "vosk", "zhconv")
+failed = []
+for m in mods:
+    try:
+        __import__(m)
+    except Exception as e:
+        failed.append("%s: %s" % (m, e))
+try:
+    from speech_vad import create_webrtc_vad
+    if create_webrtc_vad(2) is None:
+        failed.append("webrtcvad: create_webrtc_vad returned None")
+except Exception as e:
+    failed.append("speech_vad: %s" % e)
+if failed:
+    print("IMPORT_FAIL")
+    for x in failed:
+        print(x)
+    sys.exit(1)
+print("IMPORT_OK")
+'@ | Set-Content $verifyPy -Encoding ASCII
+    & $PyExe $verifyPy
+    $verifyOk = $LASTEXITCODE -eq 0
+    Remove-Item $verifyPy -Force -ErrorAction SilentlyContinue
+    if ($verifyOk) { Write-Ok "  核心包 import 校验通过" }
+    else { Write-Warn "  裁剪后 import 校验失败，请检查是否误删依赖" }
+}
+
+# 删除 pip / wheel；保留 setuptools（webrtcvad 等运行时可能需要 pkg_resources）
+foreach ($pkg in @("pip", "wheel", "_distutils_hack")) {
     $pkgPath = Join-Path $siteDir $pkg
     if (Test-Path $pkgPath) {
         Remove-Item $pkgPath -Recurse -Force -ErrorAction SilentlyContinue
         Write-Info "  已删除 $pkg"
     }
-    # 也删除对应的 .dist-info
     $distInfo = @(Get-ChildItem $siteDir -Filter "${pkg}-*.dist-info" -Directory -ErrorAction SilentlyContinue)
     foreach ($d in $distInfo) { Remove-Item $d.FullName -Recurse -Force -ErrorAction SilentlyContinue }
 }
 
-# 删除 Scripts 下的 pip / wheel 可执行文件
 foreach ($exe in @("pip.exe","pip3.exe","pip3.11.exe","wheel.exe","easy_install.exe","easy_install-3.11.exe")) {
     $exePath = Join-Path $PythonDir "Scripts\$exe"
     if (Test-Path $exePath) { Remove-Item $exePath -Force -ErrorAction SilentlyContinue }
@@ -375,38 +553,74 @@ Write-Ok "清理完成，Python 目录当前大小：${afterMB} MB"
 Write-Step 5 "下载 Whisper 模型（$WhisperModel）"
 Write-Info "持久缓存目录: $WModelCacheHF"
 
-# Check whether this model is already cached (HF hub structure)
-$modelKey  = "models--Systran--faster-whisper-$WhisperModel"
-$modelSnap = Join-Path $WModelCacheHF "hub\$modelKey\snapshots"
-$alreadyCached = (Test-Path $modelSnap) -and ((Get-ChildItem $modelSnap -ErrorAction SilentlyContinue).Count -gt 0)
+# Complete cache = snapshot contains model.bin (refs-only / blobs-only is incomplete)
+$modelKey   = "models--Systran--faster-whisper-$WhisperModel"
+$modelHub   = Join-Path $WModelCacheHF "hub\$modelKey"
+$modelSnap  = Join-Path $modelHub "snapshots"
 
-if ($alreadyCached) {
-    Write-Ok "Whisper 模型已在缓存中，跳过下载：$modelKey"
+function Test-WhisperSnapshotComplete {
+    param([string]$SnapshotsDir)
+    if (-not (Test-Path $SnapshotsDir)) { return $false }
+    foreach ($snap in Get-ChildItem $SnapshotsDir -Directory -ErrorAction SilentlyContinue) {
+        foreach ($w in @("model.bin", "model.safetensors")) {
+            $p = Join-Path $snap.FullName $w
+            if ((Test-Path $p) -and ((Get-Item $p).Length -gt 1MB)) { return $true }
+        }
+    }
+    return $false
+}
+
+if (Test-WhisperSnapshotComplete $modelSnap) {
+    Write-Ok "Whisper 模型已在缓存中（含权重文件），跳过下载：$modelKey"
 } else {
-    Write-Info "缓存未命中，开始下载（首次约需几分钟）..."
+    if (Test-Path $modelHub) {
+        Write-Warn "发现不完整的模型缓存（无 model.bin），正在删除后重新下载..."
+        Remove-Item $modelHub -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    if ($WhisperModel -eq "large-v3") {
+        Write-Info "large-v3 约 3GB，下载可能需要 20-60 分钟，请保持网络畅通..."
+    } else {
+        Write-Info "缓存未命中，开始下载（首次约需数分钟）..."
+    }
 
-    $env:HF_HOME     = $WModelCacheHF
-    $env:HF_ENDPOINT = $HF_MIRROR
+    $env:HF_HOME                  = $WModelCacheHF
+    $env:HF_ENDPOINT              = $HF_MIRROR
+    $env:HUGGINGFACE_HUB_ENDPOINT = $HF_MIRROR
+    $env:HF_HUB_OFFLINE           = "0"
 
-    # Write Python download script to a temp file to avoid heredoc parsing issues
     $dlPy = Join-Path $env:TEMP "wh_dl_$PID.py"
     @'
-import os, sys
-os.environ["HF_HOME"]     = "__HFDIR__"
+import os, sys, glob
+os.environ["HF_HOME"] = "__HFDIR__"
 os.environ["HF_ENDPOINT"] = "__HFEP__"
+os.environ["HUGGINGFACE_HUB_ENDPOINT"] = "__HFEP__"
+os.environ.pop("HF_HUB_OFFLINE", None)
 try:
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 except Exception:
     pass
+model = "__MODEL__"
+repo = f"Systran/faster-whisper-{model}"
 try:
     from faster_whisper import WhisperModel
-    print("  Downloading Whisper model __MODEL__ ...")
-    m = WhisperModel("__MODEL__", device="cpu", compute_type="int8")
-    print("  Whisper model ready.")
-    del m
+    print(f"  Downloading {model} via faster-whisper ...", flush=True)
+    WhisperModel(model, device="cpu", compute_type="int8")
 except Exception as e:
-    print("  [warn] " + str(e), file=sys.stderr)
-    print("  Model will be downloaded automatically on first service start.")
+    print(f"  faster-whisper load failed: {e}", file=sys.stderr)
+    try:
+        from huggingface_hub import snapshot_download
+        print(f"  Retrying snapshot_download({repo}) ...", flush=True)
+        snapshot_download(repo_id=repo)
+    except Exception as e2:
+        print(f"  snapshot_download failed: {e2}", file=sys.stderr)
+        sys.exit(1)
+hub = os.path.join("__HFDIR__", "hub", f"models--Systran--faster-whisper-{model}", "snapshots", "*")
+for p in glob.glob(os.path.join(hub, "model.bin")) + glob.glob(os.path.join(hub, "model.safetensors")):
+    if os.path.getsize(p) > 1_000_000:
+        print(f"  OK: {p} ({os.path.getsize(p) // (1024*1024)} MB)", flush=True)
+        sys.exit(0)
+print("  ERROR: model.bin not found after download", file=sys.stderr)
+sys.exit(1)
 '@ | Set-Content $dlPy -Encoding UTF8
 
     $hfEscaped = $WModelCacheHF -replace '\\', '\\\\'
@@ -417,7 +631,14 @@ except Exception as e:
         Set-Content $dlPy -Encoding UTF8
 
     & $PyExe $dlPy
+    if ($LASTEXITCODE -ne 0) {
+        Write-Fail "Whisper 模型 '$WhisperModel' 下载失败。请检查网络、代理或 HF 镜像 ($HF_MIRROR)。"
+    }
     Remove-Item $dlPy -Force -ErrorAction SilentlyContinue
+    if (-not (Test-WhisperSnapshotComplete $modelSnap)) {
+        Write-Fail "下载结束但 snapshot 仍无 model.bin，请重试 build_offline.bat $WhisperModel"
+    }
+    Write-Ok "Whisper 模型下载完成：$WhisperModel"
 }
 
 # ── 将 Whisper 模型以 HF hub 缓存结构打包进 models\hf\
@@ -431,27 +652,36 @@ if (Test-Path $snapshotBase) {
     $latestSnap = Get-ChildItem $snapshotBase -Directory |
                   Sort-Object LastWriteTime -Descending | Select-Object -First 1
     if ($latestSnap) {
+        $weightFile = @("model.bin", "model.safetensors") | ForEach-Object {
+            Join-Path $latestSnap.FullName $_
+        } | Where-Object { Test-Path $_ } | Select-Object -First 1
+        if (-not $weightFile) {
+            Write-Fail @"
+Whisper 模型 '$WhisperModel' 下载不完整（snapshot 中无 model.bin）。
+请删除缓存后重试:
+  Remove-Item -Recurse -Force '$modelKey' -ErrorAction SilentlyContinue
+  (位于 $WModelCacheHF\hub\)
+然后重新运行 build_offline.bat $WhisperModel cuda
+"@
+        }
         $snapHash   = $latestSnap.Name
         $destSnap   = Join-Path $hfPackDir "hub\$modelKey\snapshots\$snapHash"
         $destRefs   = Join-Path $hfPackDir "hub\$modelKey\refs"
         New-Item -ItemType Directory -Force -Path $destSnap | Out-Null
         New-Item -ItemType Directory -Force -Path $destRefs | Out-Null
-        Write-Info "打包 Whisper 模型到 models\hf\ (只含 snapshot，无 blobs 副本)..."
-        robocopy $latestSnap.FullName $destSnap /E /NFL /NDL /NJH /NJS /NC /NS /NP | Out-Null
-        # 写 refs/main 让 huggingface_hub 能按 revision 定位
+        Write-Info "打包 Whisper 模型到 models\hf\ (snapshot 含 model.bin)..."
+        # Copy-Item 会复制实体文件；robocopy 默认可能只复制符号链接导致缺 model.bin
+        Copy-Item -Path (Join-Path $latestSnap.FullName '*') -Destination $destSnap -Recurse -Force
         Set-Content (Join-Path $destRefs "main") $snapHash -Encoding ASCII -NoNewline
+        Set-Content (Join-Path $ModelsDir "bundled_whisper_model.txt") $WhisperModel -Encoding ASCII -NoNewline
         $modelFiles = @(Get-ChildItem $destSnap -Recurse -File -ErrorAction SilentlyContinue)
-        if ($modelFiles.Count -gt 0) {
-            $modelSizeMB = [int](($modelFiles | Measure-Object -Property Length -Sum).Sum / 1MB)
-            Write-Ok "Whisper 模型已打包（$($modelFiles.Count) 个文件，${modelSizeMB} MB）"
-        } else {
-            Write-Warn "snapshot 目录为空，目标机器首次启动将尝试联网下载"
-        }
+        $modelSizeMB = [int](($modelFiles | Measure-Object -Property Length -Sum).Sum / 1MB)
+        Write-Ok "Whisper 模型已打包（$($modelFiles.Count) 个文件，${modelSizeMB} MB）"
     } else {
-        Write-Warn "找不到 snapshot 子目录，服务首次启动时将自动下载"
+        Write-Fail "找不到 Whisper snapshot 目录: $snapshotBase`n请检查 STEP 5 下载是否成功。"
     }
 } else {
-    Write-Warn "缓存中未找到模型文件，服务首次启动时将自动下载"
+    Write-Fail "缓存中未找到模型: $modelKey`n请检查网络/HF 镜像后重新构建。"
 }
 
 # ── STEP 6: Vosk model ─────────────────────────────────────────────────────────
@@ -546,7 +776,8 @@ Write-Step 7 "复制应用程序源文件"
 
 $appFiles = @(
     "server.py", "engine.py",
-    "server_whisper.py", "engine_whisper.py",
+    "server_whisper.py", "engine_whisper.py", "whisper_local.py", "speech_vad.py",
+    "text_postprocess.py", "wake_word_match.py", "wake_detectors.py",
     "index.html", "config.json",
     "list_devices.py", "check_env.py",
     "verify_install.py"
@@ -570,9 +801,11 @@ try {
     }
     # Use the standard HF model name — HF_HOME in start_whisper.bat points
     # to the bundled models\hf\ cache, so no network access is needed.
-    $cfg.whisper.model  = $WhisperModel
-    $cfg | ConvertTo-Json -Depth 10 | Set-Content $cfgOut -Encoding UTF8
-    Write-Ok "config.json 路径已更新"
+    $cfg.whisper.model = [string]$WhisperModel
+    $json = $cfg | ConvertTo-Json -Depth 12
+    $utf8 = New-Object System.Text.UTF8Encoding $true
+    [System.IO.File]::WriteAllText($cfgOut, $json, $utf8)
+    Write-Ok "config.json 已写入 whisper.model=$WhisperModel"
 } catch {
     Write-Warn "config.json 自动更新失败：$_"
 }
@@ -580,61 +813,57 @@ try {
 # ── STEP 8: Launch scripts ─────────────────────────────────────────────────────
 Write-Step 8 "生成启动脚本"
 
-# start_whisper.bat
-Set-Content (Join-Path $OutputDir "start_whisper.bat") @"
+# start_whisper.bat (ASCII only -- cmd.exe breaks on UTF-8 BOM / UTF-8 comments)
+Write-CmdBat (Join-Path $OutputDir "start_whisper.bat") @"
 @echo off
 chcp 65001 >nul
 setlocal enabledelayedexpansion
 set PYTHONIOENCODING=utf-8
 set PYTHONUTF8=1
-:: 将 HF_HOME 指向包内缓存，禁止联网（模型已离线打包到 models\hf\）
-:: 路径含空格时必须整段加引号，否则会变成 set HF_HOME=C:\Program 且后续片段被当命令执行
+:: HF_HOME must be quoted (paths with spaces)
 set "HF_HOME=%~dp0models\hf"
 set HF_HUB_OFFLINE=1
 set HF_DATASETS_OFFLINE=1
 cd /d "%~dp0"
-:: 将 nvidia pip 包的 DLL 目录加入 PATH，确保 ctranslate2 能加载 cublas64_12.dll 等
-:: (no-op if directory doesn't exist — safe for CPU-only packages)
+:: Add nvidia pip DLL dirs to PATH for ctranslate2 CUDA
 for /d %%P in ("%~dp0python\Lib\site-packages\nvidia\*") do (
     if exist "%%P\bin\" set "PATH=%%P\bin;!PATH!"
 )
-title 语音识别服务 (Whisper) - ws://127.0.0.1:8766
+title Speech Reco Whisper ws://127.0.0.1:8766
 echo.
 echo  ================================================
-echo    语音识别服务 (Whisper)   端口 8766
-echo    Whisper 模型: $WhisperModel
-echo    Press Ctrl+C 停止服务
+echo    Speech Recognition (Whisper)  port 8766
+echo    Model: $WhisperModel
+echo    Press Ctrl+C to stop
 echo  ================================================
 echo.
 echo y | "%~dp0python\python.exe" "%~dp0server_whisper.py"
 echo.
-echo 服务已停止。
+echo Service stopped.
 pause
-"@ -Encoding UTF8
+"@
 
-# start_vosk.bat
-Set-Content (Join-Path $OutputDir "start_vosk.bat") @"
+Write-CmdBat (Join-Path $OutputDir "start_vosk.bat") @"
 @echo off
 chcp 65001 >nul
 setlocal
 set PYTHONIOENCODING=utf-8
 set PYTHONUTF8=1
 cd /d "%~dp0"
-title 语音识别服务 (Vosk) - ws://127.0.0.1:8765
+title Speech Reco Vosk ws://127.0.0.1:8765
 echo.
 echo  ================================================
-echo    语音识别服务 (Vosk)   端口 8765
-echo    Press Ctrl+C 停止服务
+echo    Speech Recognition (Vosk)  port 8765
+echo    Press Ctrl+C to stop
 echo  ================================================
 echo.
 echo y | "%~dp0python\python.exe" "%~dp0server.py"
 echo.
-echo 服务已停止。
+echo Service stopped.
 pause
-"@ -Encoding UTF8
+"@
 
-# check_env.bat
-Set-Content (Join-Path $OutputDir "check_env.bat") @"
+Write-CmdBat (Join-Path $OutputDir "check_env.bat") @"
 @echo off
 chcp 65001 >nul
 setlocal
@@ -643,52 +872,33 @@ set PYTHONUTF8=1
 set "HF_HOME=%~dp0models\hf"
 set HF_HUB_OFFLINE=1
 cd /d "%~dp0"
-title 环境检测
+title Environment check
 "%~dp0python\python.exe" "%~dp0check_env.py"
 pause
-"@ -Encoding UTF8
+"@
 
 Write-Ok "start_whisper.bat / start_vosk.bat / check_env.bat 已生成"
 
-# ── STEP 9: README ─────────────────────────────────────────────────────────────
-$buildTime = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-Set-Content (Join-Path $OutputDir "README.txt") @"
-语音识别服务 — 离线部署包
-Speech Recognition Service — Offline Portable Package
-======================================================
-
-快速使用 / Quick Start:
-  1. 将本文件夹整体复制到目标机器
-  2. 双击 check_env.bat  — 检查依赖环境
-  3. 双击 start_whisper.bat — 启动 Whisper 服务（推荐）
-     或  start_vosk.bat     — 启动 Vosk 轻量服务
-  4. 用浏览器打开 index.html，连接 ws://127.0.0.1:8766
-
-WebSocket 地址:
-  Whisper 服务: ws://127.0.0.1:8766
-  Vosk    服务: ws://127.0.0.1:8765
-
-系统要求:
-  - Windows 10 (Build 1809+) 或 Windows 11，64-bit
-  - Visual C++ 2015-2022 Redistributable (x64)
-    下载: https://aka.ms/vs/17/release/vc_redist.x64.exe
-  - 麦克风设备
-  - 若使用 CUDA 模式且未打包 NVIDIA 库 (BundleNvidiaCuda=false):
-    需在目标机器安装 NVIDIA CUDA Toolkit 12
-    下载: https://developer.nvidia.com/cuda-downloads
-
-目录说明:
-  python\               Python $PY_VER 嵌入式运行时 + 所有依赖包
-  models\whisper-$WhisperModel\  Whisper 模型文件（已展开，直接加载）
-  models\$CN_MODEL\     Vosk 中文语音模型
-  config.json      配置文件（可编辑）
-  index.html       Web 控制台
-
-构建信息:
-  Whisper 模型 : $WhisperModel
-  GPU 模式     : $GPU
-  构建时间     : $buildTime
-"@ -Encoding UTF8
+# STEP 9: README (from UTF-8 template file -- avoids Chinese here-strings in this .ps1)
+$buildTime    = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+$readmeOut    = Join-Path $OutputDir "README.txt"
+$readmeTpl    = Join-Path $ScriptDir "installer_assets\offline_package_README.txt"
+$utf8NoBom    = New-Object System.Text.UTF8Encoding $false
+if (Test-Path -LiteralPath $readmeTpl) {
+    $readmeText = [System.IO.File]::ReadAllText($readmeTpl, $utf8NoBom)
+    $readmeText = $readmeText.Replace("{WhisperModel}", $WhisperModel).
+        Replace("{GPU}", $GPU).Replace("{PY_VER}", $PY_VER).
+        Replace("{CN_MODEL}", $CN_MODEL).Replace("{BuildTime}", $buildTime)
+    [System.IO.File]::WriteAllText($readmeOut, $readmeText, $utf8NoBom)
+} else {
+    $fallback = @(
+        "Speech Recognition - Offline Package"
+        "Whisper model: $WhisperModel"
+        "GPU: $GPU"
+        "Built: $buildTime"
+    ) -join "`r`n"
+    [System.IO.File]::WriteAllText($readmeOut, $fallback + "`r`n", $utf8NoBom)
+}
 
 # ── Summary ────────────────────────────────────────────────────────────────────
 $totalMB = [int]((Get-ChildItem $OutputDir -Recurse -File |
