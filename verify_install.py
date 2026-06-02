@@ -56,7 +56,7 @@ bits = struct.calcsize("P") * 8
 if bits == 64:
     ok("64-bit interpreter")
 else:
-    fail(f"32-bit interpreter — vosk requires 64-bit Python")
+    fail(f"32-bit interpreter — requires 64-bit Python")
     errors.append("32-bit Python")
 
 ok(f"Platform: {platform.platform()}")
@@ -85,8 +85,10 @@ def check_import(name, min_version=None):
 check_import("websockets", "12.0")
 check_import("sounddevice", "0.4.6")
 check_import("numpy", "1.24.0")
-check_import("vosk", "0.3.45")
+check_import("faster_whisper", "1.0.0")
+check_import("ctranslate2", "4.0.0")
 check_import("openwakeword")
+check_import("silero_vad")
 
 # ── 3. onnxruntime / GPU providers ───────────────────────────────────────────
 print(f"\n{BOLD}[3] onnxruntime / GPU acceleration{RESET}")
@@ -137,40 +139,30 @@ if not cfg_path.exists():
 else:
     try:
         cfg = json.loads(cfg_path.read_text(encoding="utf-8-sig"))
-        model_path = cfg.get("asr", {}).get("model_path", "")
-        mp = pathlib.Path(model_path)
-        if mp.exists():
-            # rough size check
-            size_mb = sum(f.stat().st_size for f in mp.rglob("*") if f.is_file()) / 1e6
-            ok(f"Model found: {model_path}  ({size_mb:.0f} MB)")
+        whisper_model = cfg.get("whisper", {}).get("model", "base")
+        ok(f"Whisper model configured: {whisper_model}")
+        hf_home = pathlib.Path(
+            os.environ.get("HF_HOME", pathlib.Path.home() / ".cache" / "huggingface")
+        )
+        model_dir = hf_home / "hub" / f"models--Systran--faster-whisper-{whisper_model}"
+        if model_dir.exists():
+            ok(f"Whisper cache found under {model_dir.parent.name}/…")
         else:
-            fail(f"Model not found: {model_path}")
-            errors.append("ASR model missing")
-            info("Run install.bat to download the model.")
+            info("Whisper weights not cached yet — first start() may download them.")
     except Exception as e:
         fail(f"Error reading config.json: {e}")
         errors.append("config read error")
 
-# ── 6. Quick vosk recognizer test ────────────────────────────────────────────
-print(f"\n{BOLD}[6] Vosk recognizer test{RESET}")
+# ── 6. Engine imports ─────────────────────────────────────────────────────────
+print(f"\n{BOLD}[6] Engine module imports{RESET}")
 
 try:
-    import vosk
-    vosk.SetLogLevel(-1)
-    if mp.exists():
-        model = vosk.Model(str(mp))
-        rec   = vosk.KaldiRecognizer(model, 16000)
-        # Feed 0.5s of silence (8000 int16 samples = 16000 bytes)
-        silence = bytes(16000)
-        rec.AcceptWaveform(silence)
-        import json as _json
-        result = _json.loads(rec.FinalResult())
-        ok(f"Vosk recognizer OK — result: {result}")
-    else:
-        warn("Skipped — model not found.")
+    from engine import SpeechEngine, EngineState  # noqa: F401
+    from wake_detectors import OpenWakeWordWakeWordDetector  # noqa: F401
+    ok("engine + wake_detectors import OK")
 except Exception as e:
-    fail(f"Vosk test failed: {e}")
-    errors.append("vosk recognizer error")
+    fail(f"Engine import failed: {e}")
+    errors.append("engine import error")
 
 # ── Summary ───────────────────────────────────────────────────────────────────
 print(f"\n{BOLD}{border}{RESET}")

@@ -63,16 +63,16 @@ def run_checks(config_path: str = "config.json") -> List[Dict]:
 
     # ── 4. Optional backends ──────────────────────────────────────────────────
     try:
-        import vosk
-        add("vosk", "ok", getattr(vosk, "__version__", "已安装"))
-    except ImportError:
-        add("vosk", "info", "未安装（仅限 Whisper 模式时可忽略）")
-
-    try:
         import openwakeword as oww
         add("openwakeword", "ok", getattr(oww, "__version__", "已安装"))
     except ImportError:
-        add("openwakeword", "info", "未安装（openwakeword 唤醒词不可用）")
+        add("openwakeword", "error", "未安装（唤醒词不可用）")
+
+    try:
+        import silero_vad  # noqa: F401
+        add("silero-vad", "ok", "已安装")
+    except ImportError:
+        add("silero-vad", "error", "未安装（录音判停不可用）")
 
     try:
         import onnxruntime as ort
@@ -121,18 +121,6 @@ def run_checks(config_path: str = "config.json") -> List[Dict]:
         try:
             cfg = json.loads(cfg_path.read_text(encoding="utf-8-sig"))
 
-            # Vosk model
-            vosk_path = pathlib.Path(cfg.get("asr", {}).get("model_path", ""))
-            if vosk_path.exists():
-                size_mb = sum(
-                    f.stat().st_size for f in vosk_path.rglob("*") if f.is_file()
-                ) / 1e6
-                add("Vosk 模型", "ok", f"{vosk_path.name}（{size_mb:.0f} MB）")
-            else:
-                add("Vosk 模型", "warn",
-                    f"未找到：{vosk_path} — vosk 唤醒词不可用")
-
-            # Whisper model (check local HF hub cache)
             whisper_model = cfg.get("whisper", {}).get("model", "base")
             hf_home = pathlib.Path(
                 os.environ.get("HF_HOME",

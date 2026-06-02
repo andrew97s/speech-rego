@@ -1,43 +1,27 @@
 #!/usr/bin/env python3
 """
-Speech Recognition WebSocket Server
+语音识别 WebSocket 服务：openWakeWord + Silero VAD + faster-whisper。
 
-WebSocket API
--------------
-Client -> Server (JSON):
-  {"cmd": "start"}                           Start the engine / open mic
-  {"cmd": "stop"}                            Stop the engine / release mic
-  {"cmd": "listen"}                          Manually trigger one listen session
-  {"cmd": "cancel"}                          Abort current listen session
-  {"cmd": "suppress_input", "duration_ms": 1500}  Ignore mic while client plays TTS
-  {"cmd": "status"}                          Request current status
-  {"cmd": "config", "key": "k", "value": v}  Update a config value at runtime
-
-Server -> Client (JSON):
-  {"event": "status",          "state": "stopped|no_device|idle|listening", ...}
-  {"event": "wake_word",       "keyword": str, "score": float, "ts": float}
-  {"event": "listening_start", "trigger": "wake_word|manual|vad", "ts": float}
-  {"event": "partial",         "text": str, "ts": float}
-  {"event": "transcript",      "text": str, "is_final": true, "ts": float}
-  {"event": "listening_end",   "reason": "silence|timeout|cancelled", "ts": float}
-  {"event": "error",           "code": str, "message": str, "ts": float}
-  {"event": "ack",             "cmd": str, "ts": float}
-  {"event": "config_updated",  "key": str, "value": any, "ts": float}
+Usage:
+  python server.py
 """
 
 import asyncio
 import json
 import logging
+import os
 import sys
+import threading
 import time
 from typing import Optional, Set
 
 import websockets
 from websockets.server import WebSocketServerProtocol
 
-from engine import SpeechEngine, EngineState
+from engine import EngineState, SpeechEngine
+from text_postprocess import get_postprocess_config
 
-# Windows: use Selector event loop for proper signal / Ctrl+C delivery
+# Windows: use Selector event loop for proper Ctrl+C delivery
 if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
@@ -48,30 +32,64 @@ _DEFAULTS: dict = {
     "host": "127.0.0.1",
     "port": 8765,
     "wake_word": {
-        "enabled": True,
-        "keywords": ["hey_jarvis"],
-        "prefixes": ["你好", "嗨", "hi", "hey"],
-        "aliases": [],
-        "use_grammar": False,
+        "enabled":     True,
+        "keywords":    ["hey jarvis"],
+        "oww_models":  ["hey_jarvis"],
+        "oww_inference_framework": "onnx",
+        "oww_vad_threshold": 0,
+        "oww_debounce_sec": 0.8,
+        "pause_until_listen": False,
+        "wake_repeat_cooldown_ms": 1500,
         "sensitivity": 0.5,
+        "require_pre_silence_ms": 350,
+        "pre_silence_min_ratio": 0.65,
+        "pre_silence_level_ratio": 0.32,
+        "gate_use_silero": False,
+        "max_wake_utterance_ms": 1400,
     },
-    "asr": {
-        "model_path": "models/vosk-model-small-cn-0.22",
-        "max_silence_ms": 1500,
-        "max_listen_ms": 30000,
-    },
-    "audio": {
-        "device": None,
-        "sample_rate": 16000,
-        "chunk_size": 4000,
-        "energy_threshold": 0.02,
+    "whisper": {
+        "model":               "base",
+        "language":            None,   # None = auto-detect (mixed Chinese/English)
+        "device":              "cpu",
+        "compute_type":        "int8",
+        "partial_interval_ms": 0,
+        "verbatim":            True,
+        "verbatim_initial_prompt": (
+            "以下是普通话口语的逐字转写。请完整保留说话人的原话，"
+            "不要改写、不要概括、不要省略、不要改成问句或列表。"
+        ),
+        "temperature":         0,
+        "max_silence_ms":      2000,
+        "silero_threshold":    0.5,
+        "silero_speech_fraction": 0.2,
+        "max_listen_ms":       30000,
+        "vad_cooldown_ms":     500,
+        "vad_min_speech_ms":   200,
+        "min_listen_ms":       1000,
+        "min_transcribe_sec":  1.5,
+        "asr_max_no_speech_prob": 0.58,
+        "silero_end_speech_fraction": 0.12,
+        "initial_prompt":      None,   # e.g. "以下是普通话，包含中文、数字和英文字母。"
+        "post_wake_grace_ms":  3000,   # after wake word, ignore mic (TTS echo; use longer with speakers)
+        "output_simplified":   True,   # convert traditional -> simplified Chinese
     },
     "postprocess": {
         "output_simplified":   True,
-        "post_wake_grace_ms":  1500,
+        "post_wake_grace_ms":  3000,
         "suppress_phrases":    ["我在", "在呢", "我在呢", "嗯", "啊", "好的"],
+        "replacements":        {},
+    },
+    "audio": {
+        "device":           None,
+        "sample_rate":      16000,   # ignored for Whisper (always 16 kHz)
+        "chunk_size":       4000,
+        "energy_threshold": 0.02,
+        "input_channels":   1,      # set 2 for stereo mics; downmixed before ASR
+        "stereo_mode":      "mix",  # mix | left | right
     },
     "log_level": "INFO",
+    "http_port": 8080,   # 0 = disabled; serve index.html on this port
+    # 无 WebSocket 客户端连接超过该时长(ms)后自动 engine.stop() 释放麦克风；0=关闭
     "auto_stop_without_clients_ms": 60000,
 }
 
@@ -90,21 +108,47 @@ def _deep_merge(base: dict, override: dict) -> dict:
 
 def load_config(path: str = "config.json") -> dict:
     log = logging.getLogger("config")
+    path = os.environ.get("SPEECH_REGO_CONFIG", path)
+    abs_path = os.path.abspath(path)
+
+    def _read_user() -> dict:
+        last_err: Optional[Exception] = None
+        for enc in ("utf-8-sig", "utf-8", "utf-16", "utf-16-le"):
+            try:
+                with open(path, encoding=enc) as f:
+                    return json.load(f)
+            except (FileNotFoundError, UnicodeError, json.JSONDecodeError) as exc:
+                last_err = exc
+                if isinstance(exc, FileNotFoundError):
+                    raise
+        raise json.JSONDecodeError(str(last_err), "", 0)
+
     try:
-        with open(path, encoding="utf-8-sig") as f:
-            user = json.load(f)
-        return _deep_merge(_DEFAULTS, user)
+        user = _read_user()
+        merged = _deep_merge(_DEFAULTS, user)
+        w = merged.get("whisper", {})
+        log.info(
+            "Loaded %s — whisper.model=%s device=%s compute_type=%s",
+            abs_path,
+            w.get("model", "base"),
+            w.get("device", "cpu"),
+            w.get("compute_type", "int8"),
+        )
+        return merged
     except FileNotFoundError:
-        log.warning(f"'{path}' not found, using defaults")
+        log.warning("%s not found — using built-in defaults (base/cpu/int8)", abs_path)
         return dict(_DEFAULTS)
     except json.JSONDecodeError as exc:
-        log.error(f"Invalid JSON in '{path}': {exc}")
+        log.error(
+            "Invalid JSON in %s (%s) — using built-in defaults (base/cpu/int8). "
+            "Fix the file or set SPEECH_REGO_CONFIG to another path.",
+            abs_path,
+            exc,
+        )
         return dict(_DEFAULTS)
 
 
 def save_config(config: dict, path: str = "config.json"):
-    """Write runtime config back to disk so changes survive process restarts.
-    Keys starting with '_' (notes/comments) are stripped from the output."""
     def _strip(d: dict) -> dict:
         return {k: _strip(v) if isinstance(v, dict) else v
                 for k, v in d.items() if not k.startswith("_")}
@@ -118,28 +162,40 @@ def save_config(config: dict, path: str = "config.json"):
 def setup_logging(level: str = "INFO"):
     numeric = getattr(logging, level.upper(), logging.INFO)
     logging.basicConfig(
-        level=numeric,
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-        datefmt="%H:%M:%S",
-        handlers=[logging.StreamHandler(sys.stdout)],
+        level   = numeric,
+        format  = "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        datefmt = "%H:%M:%S",
+        handlers = [logging.StreamHandler(sys.stdout)],
     )
 
 
 # ── WebSocket server ───────────────────────────────────────────────────────────
 
 class SpeechServer:
+    """
+    Whisper 版 WebSocket 服务：连接管理、命令分发、引擎事件广播。
+
+    默认端口 8765。
+    """
+
     def __init__(self, config: dict):
-        self.config = config
+        """
+        Args:
+            config: 合并默认值后的完整配置（host/port/whisper/wake_word 等）
+        """
+        self.config  = config
         self.clients: Set[WebSocketServerProtocol] = set()
-        self.loop: Optional[asyncio.AbstractEventLoop] = None
-        self.engine = SpeechEngine(config, self._on_engine_event)
-        self.logger = logging.getLogger("SpeechServer")
+        self.loop:    Optional[asyncio.AbstractEventLoop] = None
+        self.engine  = SpeechEngine(config, self._on_engine_event)
+        self.logger  = logging.getLogger("SpeechServer")
         self._no_clients_since: Optional[float] = None
 
     def _auto_stop_ms(self) -> int:
+        """无客户端连接超过该毫秒数后自动 engine.stop()；0 表示关闭。"""
         return max(0, int(self.config.get("auto_stop_without_clients_ms", 0)))
 
     def _update_server_config(self, key: str, value) -> bool:
+        """更新仅 server 层管理的 config 项（如 auto_stop_without_clients_ms）。"""
         if key == "auto_stop_without_clients_ms":
             self.config[key] = max(0, int(float(value)))
             self.logger.info(
@@ -150,43 +206,7 @@ class SpeechServer:
         return False
 
     async def _tick_auto_stop_without_clients(self) -> None:
-        ms = self._auto_stop_ms()
-        if ms <= 0:
-            self._no_clients_since = None
-            return
-        if self.clients:
-            self._no_clients_since = None
-            return
-        if self.engine.state == EngineState.STOPPED:
-            self._no_clients_since = None
-            return
-        now = time.time()
-        if self._no_clients_since is None:
-            self._no_clients_since = now
-            return
-        if (now - self._no_clients_since) * 1000 >= ms:
-            self.logger.info(
-                "No WebSocket clients for %d ms — stopping engine (microphone released)",
-                ms,
-            )
-            self.engine.stop()
-            self._no_clients_since = None
-        self._no_clients_since: Optional[float] = None
-
-    def _auto_stop_ms(self) -> int:
-        return max(0, int(self.config.get("auto_stop_without_clients_ms", 0)))
-
-    def _update_server_config(self, key: str, value) -> bool:
-        if key == "auto_stop_without_clients_ms":
-            self.config[key] = max(0, int(float(value)))
-            self.logger.info(
-                "Config updated: auto_stop_without_clients_ms = %d",
-                self.config[key],
-            )
-            return True
-        return False
-
-    async def _tick_auto_stop_without_clients(self) -> None:
+        """定时检查：无 WS 客户端且超时则 stop 引擎释放麦克风。"""
         ms = self._auto_stop_ms()
         if ms <= 0:
             self._no_clients_since = None
@@ -212,10 +232,12 @@ class SpeechServer:
     # ── Engine -> broadcast ───────────────────────────────────────────────────
 
     def _on_engine_event(self, event: dict):
+        """引擎线程回调：将事件投递到 asyncio 循环广播。"""
         if self.loop and self.loop.is_running():
             asyncio.run_coroutine_threadsafe(self._broadcast(event), self.loop)
 
     async def _broadcast(self, event: dict):
+        """向所有已连接 WebSocket 客户端发送 JSON 事件。"""
         if not self.clients:
             return
         message = json.dumps(event, ensure_ascii=False)
@@ -230,6 +252,7 @@ class SpeechServer:
     # ── Client handler ────────────────────────────────────────────────────────
 
     async def _handle_client(self, websocket: WebSocketServerProtocol):
+        """单客户端连接：注册、推送初始 status、循环 dispatch 命令。"""
         addr = websocket.remote_address
         self.logger.info(f"Client connected: {addr}")
         self.clients.add(websocket)
@@ -249,6 +272,11 @@ class SpeechServer:
                 self._no_clients_since = time.time()
 
     async def _dispatch(self, ws: WebSocketServerProtocol, raw: str):
+        """
+        解析 JSON 命令并调用 engine / 写 config。
+
+        支持 start/stop/listen/cancel/suppress_input/status/config/check 等。
+        """
         try:
             msg = json.loads(raw)
         except json.JSONDecodeError:
@@ -270,9 +298,10 @@ class SpeechServer:
             await ws.send(json.dumps({"event": "ack", "cmd": "stop", "ts": ts}))
 
         elif cmd == "listen":
+            # 判断麦克分设备是否可用
             self.engine.trigger_listen()
             await ws.send(json.dumps({"event": "ack", "cmd": "listen", "ts": ts}))
-
+            await ws.send(json.dumps(self._status_event()))
         elif cmd == "cancel":
             self.engine.cancel_listen()
             await ws.send(json.dumps({"event": "ack", "cmd": "cancel", "ts": ts}))
@@ -284,17 +313,51 @@ class SpeechServer:
                 "event": "ack", "cmd": "suppress_input", "duration_ms": duration_ms, "ts": ts,
             }))
 
+        elif cmd == "check":
+            # Run env check in a thread; results sent back as "env_check" event
+            async def _run_check(ws=ws, ts=ts):
+                try:
+                    loop = asyncio.get_running_loop()
+                    from check_env import run_checks
+                    items = await loop.run_in_executor(None, run_checks)
+                    await ws.send(json.dumps({
+                        "event": "env_check", "items": items, "ts": time.time(),
+                    }))
+                except Exception as exc:
+                    await ws.send(json.dumps({
+                        "event": "error", "code": "check_failed",
+                        "message": str(exc), "ts": time.time(),
+                    }))
+            asyncio.create_task(_run_check())
+            await ws.send(json.dumps({"event": "ack", "cmd": "check", "ts": ts}))
+
         elif cmd == "status":
             await ws.send(json.dumps(self._status_event()))
 
         elif cmd == "config":
             key   = msg.get("key", "")
             value = msg.get("value")
-            ok = self.engine.update_config(key, value)
+            ok    = self.engine.update_config(key, value)
             if not ok:
                 ok = self._update_server_config(key, value)
             if ok:
                 save_config(self.config)
+                # wake_word.* 变更后异步 preload（勿用 create_task(run_in_executor(..))：
+                # run_in_executor 返回 Future，create_task 只接受协程，会 TypeError 导致整条连接被断开）
+                if key.startswith("wake_word.") and self.loop:
+                    eng = self.engine
+
+                    async def _preload_after_wake():
+                        try:
+                            await asyncio.get_running_loop().run_in_executor(
+                                None, eng.preload
+                            )
+                        except Exception as exc:
+                            self.logger.exception(
+                                "preload failed after wake_word config: %s", exc
+                            )
+
+                    asyncio.create_task(_preload_after_wake())
             await ws.send(json.dumps({
                 "event": "config_updated" if ok else "error",
                 "code":  None if ok else "invalid_key",
@@ -312,35 +375,50 @@ class SpeechServer:
             }))
 
     def _status_event(self) -> dict:
+        """构造当前引擎与服务配置的 status 事件 dict。"""
+        ww = self.config["wake_word"]
+        w  = self.config.get("whisper", {})
+        _pp = get_postprocess_config(self.config)
         return {
-            "event":             "status",
-            "state":             self.engine.state.value,
-            "wake_word_enabled": self.config["wake_word"]["enabled"],
-            "keywords":          self.config["wake_word"].get("keywords", []),
+            "event":                  "status",
+            "state":                  self.engine.state.value,
+            "wake_word_enabled":      ww.get("enabled", True),
+            "keywords":               ww.get("keywords", []),
+            "mode":                   "openwakeword",
+            "whisper_max_silence_ms": w.get("max_silence_ms", 2500),
+            "whisper_min_listen_ms":  w.get("min_listen_ms", 600),
+            "whisper_max_listen_ms":  w.get("max_listen_ms", 30000),
+            "post_wake_grace_ms":     int(_pp.get("post_wake_grace_ms", 1500)),
             "auto_stop_without_clients_ms": self._auto_stop_ms(),
-            "ts":                time.time(),
+            "ts":                     time.time(),
         }
 
     # ── Server lifecycle ──────────────────────────────────────────────────────
 
     async def run(self):
+        """启动 WebSocket 服务：preload 模型、accept 连接、定时 auto-stop。"""
         self.loop = asyncio.get_running_loop()
 
-        # NOTE: engine is NOT started automatically.
-        # The microphone is opened only when the client sends {"cmd": "start"}.
+        host     = self.config["host"]
+        port     = self.config["port"]
+        ww       = self.config["wake_word"]
+        wcfg     = self.config["whisper"]
+        language = wcfg.get("language")
+        lang_str = language if language else "auto (中文/English 混合)"
 
-        host = self.config["host"]
-        port = self.config["port"]
-        ww   = self.config["wake_word"]
-
-        border = "=" * 54
+        border = "=" * 56
         self.logger.info(border)
         self.logger.info("  Speech Recognition WebSocket Service")
         self.logger.info(f"  ws://{host}:{port}")
-        self.logger.info(f"  Wake word : {'enabled' if ww['enabled'] else 'disabled'}")
+        self.logger.info(f"  Wake word  : {'enabled' if ww['enabled'] else 'disabled'}")
         if ww["enabled"]:
-            self.logger.info(f"  Keywords  : {', '.join(ww.get('keywords', []))}")
-        self.logger.info(f"  ASR model : {self.config['asr']['model_path']}")
+            self.logger.info(f"  Keywords   : {', '.join(ww.get('keywords', []))}")
+        self.logger.info(f"  Model      : {wcfg.get('model', 'base')}")
+        self.logger.info(f"  Language   : {lang_str}")
+        self.logger.info(f"  Device     : {wcfg.get('device', 'cpu')} / {wcfg.get('compute_type', 'int8')}")
+        http_port = self.config.get("http_port", 8080)
+        if http_port:
+            self.logger.info(f"  UI         : http://127.0.0.1:{http_port}/index.html")
         idle_ms = self._auto_stop_ms()
         if idle_ms > 0:
             self.logger.info(
@@ -350,28 +428,75 @@ class SpeechServer:
             self.logger.info("  Auto-stop  : disabled (auto_stop_without_clients_ms=0)")
         self.logger.info(border)
 
+        # Pre-load Whisper model + wake word detector before accepting connections
+        # so that the first start() command from the client is near-instant.
+        self.logger.info("Pre-loading models (this may take a moment on first run)…")
+        try:
+            await self.loop.run_in_executor(None, self.engine.preload)
+            self.logger.info("Models ready.  Server accepting connections.")
+        except Exception as exc:
+            self.logger.error(
+                f"Model pre-load failed: {exc}.  "
+                "start() will retry loading when called by the client."
+            )
+
         try:
             async with websockets.serve(self._handle_client, host, port):
                 self.logger.info(
-                    "Server ready.  Open index.html to connect.  Ctrl+C to stop."
+                    "Open index.html to connect.  Ctrl+C to stop."
                 )
-                # Periodically yield so Python's signal handler can run on Windows.
                 while True:
                     await self._tick_auto_stop_without_clients()
                     await asyncio.sleep(0.5)
         except (asyncio.CancelledError, KeyboardInterrupt):
             pass
         finally:
-            self.logger.info("Shutting down engine...")
+            self.logger.info("Shutting down engine…")
             self.engine.stop()
             self.logger.info("Server stopped.")
+
+
+# ── HTTP static server ─────────────────────────────────────────────────────────
+
+def _start_http_server(port: int, directory: str):
+    """Serve *directory* over HTTP on *port* in a daemon thread.
+    Silently disabled when port == 0."""
+    if not port:
+        return
+    import http.server
+    handler = http.server.SimpleHTTPRequestHandler
+
+    class _QuietHandler(handler):
+        """Suppress per-request log lines to keep the console clean."""
+        def log_message(self, fmt, *args):   # noqa: ARG002
+            pass
+        def log_error(self, fmt, *args):
+            logging.getLogger("http").warning(fmt % args)
+
+    def _serve():
+        os.chdir(directory)
+        with http.server.HTTPServer(("", port), _QuietHandler) as httpd:
+            logging.getLogger("http").info(
+                f"HTTP server: http://127.0.0.1:{port}/index.html"
+            )
+            httpd.serve_forever()
+
+    t = threading.Thread(target=_serve, daemon=True, name="HTTPServer")
+    t.start()
 
 
 # ── Entry point ────────────────────────────────────────────────────────────────
 
 def main():
+    # Ensure CWD = script directory so relative paths in config.json
+    # (e.g. "models/whisper-small") resolve correctly regardless of how
+    # the server was launched.
+    app_dir = os.path.dirname(os.path.abspath(__file__))
+    os.chdir(app_dir)
     config = load_config()
     setup_logging(config.get("log_level", "INFO"))
+    http_port = config.get("http_port", 8080)
+    _start_http_server(http_port, app_dir)
     server = SpeechServer(config)
     try:
         asyncio.run(server.run())

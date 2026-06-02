@@ -3,15 +3,17 @@
 .SYNOPSIS
     离线部署包构建脚本
     Builds a fully self-contained portable folder — copy it to any Windows
-    machine and run start_whisper.bat without any prior installation.
+    machine and run start.bat without any prior installation.
 
 .DESCRIPTION
     输出文件夹包含:
       python\      Python 3.11 嵌入式运行时 + 所有 pip 依赖
-      models\      Vosk 中文模型 + Whisper 模型 HuggingFace 本地缓存
-      *.py         应用程序源码
+      models\      Whisper 模型 HuggingFace 本地缓存 + openWakeWord 模型
+      *.py         应用程序源码（server.py / engine.py 等）
       config.json  配置文件（已自动调整路径）
-      start_whisper.bat / start_vosk.bat / check_env.bat
+      start.bat / check_env.bat
+
+    技术栈: openWakeWord 唤醒 + Silero VAD 判停 + faster-whisper ASR
 
     目标机器系统要求:
       - Windows 10 Build 1809+ / Windows 11 (x64)
@@ -28,13 +30,8 @@
     cuda  — NVIDIA CUDA（需目标机器有 CUDA 12）
     dml   — DirectML / DirectX 12（AMD / Intel / NVIDIA，无需 CUDA）
 
-.PARAMETER IncludeVosk
-    是否下载并打包 Vosk 中文模型（默认: $true）
-
 .PARAMETER IncludeOWW
-    是否安装 openwakeword 唤醒词包（默认: $false）
-    关闭可节省约 150 MB（省去 scipy + onnxruntime 等依赖）
-    默认唤醒词模式为 vosk/whisper，无需 openwakeword
+    是否安装 openwakeword 并下载内置唤醒模型（默认: $true）
 
 .PARAMETER BundleNvidiaCuda
     是否将 nvidia-cublas / nvidia-cudnn 等 CUDA 运行库打包进部署包（默认: $false）
@@ -45,10 +42,10 @@
     输出目录（默认: .\dist\SpeechReco-Offline）
 
 .EXAMPLE
-    .\build_offline.ps1 -WhisperModel tiny -GPU none -IncludeVosk $false
-        # 约最小体积：CPU + tiny 模型 + 无 Vosk + 自动裁剪 onnxruntime 等
-    .\build_offline.ps1 -WhisperModel small -GPU cuda -BundleNvidiaCuda $true
-        # 目标机 NVIDIA + 完整 CUDA 离线（体积最大）
+    .\build_offline.ps1 -WhisperModel tiny -GPU none
+        # 约最小体积：CPU + tiny 模型
+    .\build_offline.ps1 -WhisperModel small -GPU cuda -IncludeOWW $false
+        # 不打包 openWakeWord（无唤醒词功能）
     .\build_offline.ps1 -PruneUnusedDeps $false
         # 保留 pip 拉取的全部依赖（调试用）
     .\build_offline.ps1 -WhisperModel small -GPU cuda -OutputDir D:\deploy
@@ -58,8 +55,7 @@ param(
     [string] $WhisperModel    = "small",
     [ValidateSet("none","cuda","dml","auto")]
     [string] $GPU             = "auto",
-    [bool]   $IncludeVosk     = $true,
-    [bool]   $IncludeOWW      = $false,   # openwakeword 唤醒词（默认关闭；默认用 vosk/whisper 唤醒词，无需额外依赖）
+    [bool]   $IncludeOWW      = $true,
     [bool]   $BundleNvidiaCuda = $false, # 是否打包 nvidia-* CUDA 运行库（约 800MB）；false=目标机需自行安装 CUDA Toolkit
     [bool]   $PruneUnusedDeps  = $true,  # 构建后卸载 onnxruntime / hf_xet / HF CLI 等运行时不需要的包
     [string] $OutputDir       = ""
@@ -84,90 +80,22 @@ function Write-CmdBat {
     [System.IO.File]::WriteAllText($Path, $text, $enc)
 }
 
-# webrtcvad has no win_amd64 wheel on PyPI; embed Python lacks Include/Python.h.
-# Build with host Python 3.11 headers + python311.lib, or copy a prebuilt extension.
-function Install-EmbeddedWebRtcVad {
+# pip 常把 WARNING 写到 stderr；PowerShell 会误报 NativeCommandError。只看 exit code。
+function Invoke-EmbeddedPip {
     param(
-        [string] $PyExe,
-        [string] $PythonDir,
-        [string] $SiteDir
+        [Parameter(Mandatory)][string[]]$PipArgs,
+        [switch]$Quiet
     )
-
-    $hostVer = $null
-    try {
-        $hostVer = & py -3.11 -c "import sys; print('%d.%d.%d' % sys.version_info[:3])" 2>$null
-    } catch { }
-
-    if (-not $hostVer -or -not ($hostVer -match '^3\.11\.')) {
-        Write-Fail @"
-webrtcvad 需要在本机构建或复制扩展，但找不到 Python 3.11。
-请安装 https://www.python.org/downloads/windows/ （勾选 py launcher），然后重试 build_offline。
-"@
-    }
-
-    $hostPrefix = (& py -3.11 -c "import sys; print(sys.base_prefix)" 2>$null).Trim()
-    $hostInclude = Join-Path $hostPrefix "Include"
-    $hostLibs    = Join-Path $hostPrefix "libs"
-    $pyLib       = Join-Path $hostLibs "python311.lib"
-
-    if (-not (Test-Path (Join-Path $hostInclude "Python.h"))) {
-        Write-Fail "本机 Python 3.11 缺少 Include\Python.h，请重装完整版 Python（非 embed 包）。"
-    }
-
-    $embedLibs = Join-Path $PythonDir "libs"
-    if (-not (Test-Path $embedLibs)) {
-        New-Item -ItemType Directory -Force -Path $embedLibs | Out-Null
-    }
-    if ((Test-Path $pyLib) -and -not (Test-Path (Join-Path $embedLibs "python311.lib"))) {
-        Copy-Item $pyLib (Join-Path $embedLibs "python311.lib") -Force
-        Write-Info "  已复制 python311.lib 到嵌入式 Python（供编译 C 扩展）"
-    }
-
-    Write-Info "  尝试在嵌入式 Python 中编译 webrtcvad（使用本机 3.11 头文件）..."
-    $prevInclude = $env:INCLUDE
-    $env:INCLUDE = "$hostInclude;$prevInclude"
+    $args = @('-m', 'pip') + $PipArgs + '--no-warn-script-location'
+    if ($Quiet) { $args += '--quiet' }
     $prevEap = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
-    & $PyExe -m pip install 'webrtcvad>=2.0.10' --no-cache-dir 2>&1 | Out-Null
-    $ErrorActionPreference = $prevEap
-    $env:INCLUDE = $prevInclude
-
-    $pyd = Get-ChildItem $SiteDir -Filter "_webrtcvad*.pyd" -ErrorAction SilentlyContinue | Select-Object -First 1
-    if ($LASTEXITCODE -eq 0 -and $pyd) {
-        return
+    try {
+        & $PyExe @args 2>&1 | Out-Null
+        return [int]$LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $prevEap
     }
-
-    Write-Warn "  嵌入式 pip 编译失败，改从本机 Python 3.11 复制 webrtcvad 扩展..."
-    & py -3.11 -m pip install 'webrtcvad>=2.0.10' -q 2>&1 | Out-Null
-    if ($LASTEXITCODE -ne 0) {
-        Write-Fail "本机 pip 安装 webrtcvad 失败。请确认已安装 Visual C++ Build Tools 后重试。"
-    }
-
-    $hostSite = (& py -3.11 -c "import webrtcvad, os; print(os.path.dirname(webrtcvad.__file__))" 2>$null).Trim()
-    if (-not $hostSite -or -not (Test-Path $hostSite)) {
-        Write-Fail "无法定位本机 webrtcvad 包路径。"
-    }
-
-    foreach ($name in @("webrtcvad.py")) {
-        $src = Join-Path $hostSite $name
-        if (Test-Path $src) { Copy-Item $src $SiteDir -Force }
-    }
-    Get-ChildItem $hostSite -Filter "_webrtcvad*.pyd" -ErrorAction SilentlyContinue | ForEach-Object {
-        Copy-Item $_.FullName $SiteDir -Force
-    }
-    $hostSiteParent = Split-Path $hostSite -Parent
-    Get-ChildItem $hostSiteParent -Filter "webrtcvad-*.dist-info" -Directory -ErrorAction SilentlyContinue |
-        ForEach-Object {
-            $dest = Join-Path $SiteDir $_.Name
-            if (Test-Path $dest) { Remove-Item $dest -Recurse -Force }
-            Copy-Item $_.FullName $SiteDir -Recurse -Force
-        }
-
-    $pyd = Get-ChildItem $SiteDir -Filter "_webrtcvad*.pyd" -ErrorAction SilentlyContinue | Select-Object -First 1
-    if (-not $pyd) {
-        Write-Fail "复制 webrtcvad 后仍找不到 _webrtcvad*.pyd。"
-    }
-    Write-Info "  已从本机 Python 复制 $($pyd.Name)"
 }
 
 # ── GPU auto-detection ────────────────────────────────────────────────────────
@@ -236,7 +164,6 @@ if (-not $OutputDir) {
 # Re-running the build reuses cached models (no re-download).
 $CacheDir      = Join-Path $ScriptDir ".offline-cache"
 $WModelCacheHF = Join-Path $CacheDir "hf"         # HuggingFace / Whisper cache
-$VoskCacheDir  = Join-Path $CacheDir "vosk"        # Vosk model cache
 $OWWCacheDir   = Join-Path $CacheDir "oww-models"  # openwakeword 模型缓存
 $PipCacheDir   = Join-Path $CacheDir "pip-cache"   # pip wheel 缓存（自动被 pip 使用）
 
@@ -245,9 +172,6 @@ $PY_ZIP     = "python-$PY_VER-embed-amd64.zip"
 $PY_URL     = "https://www.python.org/ftp/python/$PY_VER/$PY_ZIP"
 $GETPIP_URL = "https://bootstrap.pypa.io/get-pip.py"
 $HF_MIRROR  = "https://hf-mirror.com"    # faster in China
-
-$CN_MODEL   = "vosk-model-small-cn-0.22"
-$CN_URL     = "https://alphacephei.com/vosk/models/$CN_MODEL.zip"
 
 $PythonDir  = Join-Path $OutputDir "python"
 $ModelsDir  = Join-Path $OutputDir "models"
@@ -263,7 +187,6 @@ Write-Host "  输出目录      : $OutputDir"
 Write-Host "  模型缓存      : $CacheDir"
 Write-Host "  Whisper 模型  : $WhisperModel"
 Write-Host "  GPU 模式      : $GPU"
-Write-Host "  包含 Vosk     : $IncludeVosk"
 Write-Host "  包含 OWW      : $IncludeOWW"
 Write-Host "  打包 NVIDIA   : $BundleNvidiaCuda"
 Write-Host $border -ForegroundColor Cyan
@@ -272,7 +195,7 @@ Write-Host $border -ForegroundColor Cyan
 Write-Step 1 "准备输出目录"
 
 # Ensure persistent cache dirs exist (never removed)
-foreach ($d in @($CacheDir, $WModelCacheHF, $VoskCacheDir, $OWWCacheDir, $PipCacheDir)) {
+foreach ($d in @($CacheDir, $WModelCacheHF, $OWWCacheDir, $PipCacheDir)) {
     New-Item -ItemType Directory -Force -Path $d | Out-Null
 }
 # pip respects PIP_CACHE_DIR automatically — all pip install calls use the cache
@@ -350,61 +273,62 @@ $pkgs = @(
     'numpy>=1.24.0,<2.0.0',
     'faster-whisper>=1.0.0',
     'ctranslate2>=4.0.0',
-    'vosk>=0.3.45',
-    'zhconv>=1.4.3'
+    'zhconv>=1.4.3',
+    'pypinyin>=0.49.0',
+    'silero-vad>=5.1.0,<6',
+    'onnxruntime>=1.16.0'
 )
 
 foreach ($pkg in $pkgs) {
     Write-Info "  pip install $pkg"
-    & $PyExe -m pip install $pkg --prefer-binary
-    if ($LASTEXITCODE -ne 0) {
+    $rc = Invoke-EmbeddedPip @('install', $pkg, '--prefer-binary')
+    if ($rc -ne 0) {
         Write-Warn "安装 $pkg 时出错（继续）"
     }
 }
 
-# webrtcvad：PyPI 无 Windows wheel；见 Install-EmbeddedWebRtcVad（约 1MB）
-Write-Info "  install webrtcvad (speech end detection)"
-$siteDirEarly = Join-Path $PythonDir "Lib\site-packages"
-Install-EmbeddedWebRtcVad -PyExe $PyExe -PythonDir $PythonDir -SiteDir $siteDirEarly
-$wvCheck = Join-Path $env:TEMP "wv_check_$PID.py"
+# Silero VAD（Whisper 录音结束判停）
+Write-Info "  verify silero-vad + onnxruntime"
+$svCheck = Join-Path $env:TEMP "silero_check_$PID.py"
 @'
 import sys
 sys.path.insert(0, r'__SCRIPT_DIR__')
-from speech_vad import create_webrtc_vad
-assert create_webrtc_vad(2) is not None, "webrtcvad import failed"
-print("webrtcvad ok")
+from speech_vad import create_silero_vad
+s = create_silero_vad(0.5)
+assert s is not None, "create_silero_vad returned None"
+print("silero ok")
 '@.Replace('__SCRIPT_DIR__', ($ScriptDir -replace '\\', '/')) |
-    Set-Content $wvCheck -Encoding ASCII
-& $PyExe $wvCheck
+    Set-Content $svCheck -Encoding ASCII
+& $PyExe $svCheck
 if ($LASTEXITCODE -ne 0) {
-    Remove-Item $wvCheck -Force -ErrorAction SilentlyContinue
-    Write-Fail "webrtcvad 已安装但无法 import，请查看上方错误。"
+    Remove-Item $svCheck -Force -ErrorAction SilentlyContinue
+    Write-Fail "Silero VAD 校验失败，请确认 silero-vad 与 onnxruntime 已安装。"
 }
-Remove-Item $wvCheck -Force -ErrorAction SilentlyContinue
-Write-Ok "webrtcvad 已安装并校验"
+Remove-Item $svCheck -Force -ErrorAction SilentlyContinue
+Write-Ok "Silero VAD 已校验"
 
 # openwakeword: 先尝试 --only-binary（最快，无需编译）；
 # 若失败（microvad 等 native dep 无 wheel），回退 --no-deps 只装核心包，VAD 禁用但唤醒词仍可用。
 if ($IncludeOWW) {
     Write-Info "  pip install openwakeword>=0.6.0"
-    & $PyExe -m pip install 'openwakeword>=0.6.0' --only-binary=:all: 2>&1 | Out-Null
-    if ($LASTEXITCODE -eq 0) {
+    $rc = Invoke-EmbeddedPip @('install', 'openwakeword>=0.6.0', '--only-binary=:all:')
+    if ($rc -eq 0) {
         Write-Ok "  openwakeword 安装成功"
     } else {
-        Write-Warn "  全量安装失败（microvad 无 wheel）→ 回退安装核心包（VAD 禁用，唤醒词仍可用）"
-        & $PyExe -m pip install 'openwakeword>=0.6.0' --no-deps --prefer-binary --quiet
-        # openwakeword 核心运行时依赖（不含 microvad/VAD）
-        & $PyExe -m pip install 'tqdm' 'requests' 'scipy' --prefer-binary --quiet
-        if ($LASTEXITCODE -ne 0) {
+        Write-Warn "  全量安装失败（microvad 无 wheel）→ 回退安装核心包"
+        $rc = Invoke-EmbeddedPip @(
+            'install', 'openwakeword>=0.6.0', '--no-deps', '--prefer-binary'
+        ) -Quiet
+        Invoke-EmbeddedPip @('install', 'tqdm', 'requests', 'scipy', '--prefer-binary') -Quiet
+        if ($rc -ne 0) {
             Write-Warn "  openwakeword 安装失败，唤醒词功能将不可用"
+        } else {
+            Write-Ok "  openwakeword 核心包安装成功"
         }
     }
 } else {
     Write-Info "  跳过 openwakeword（IncludeOWW=False）"
 }
-
-# onnxruntime: faster-whisper 元数据依赖，但 speech-rego 使用 vad_filter=False，无需安装（约 350+ MB）
-Write-Info "  跳过 onnxruntime / onnxruntime-gpu（项目未启用 Whisper 内置 VAD）"
 
 switch ($GPU) {
     "cuda" {
@@ -420,9 +344,11 @@ switch ($GPU) {
             )
             foreach ($nvp in $nvPkgs) {
                 Write-Info "    pip install $nvp"
-                & $PyExe -m pip install $nvp --prefer-binary `
-                    --index-url https://pypi.tuna.tsinghua.edu.cn/simple
-                if ($LASTEXITCODE -ne 0) { Write-Warn "    $nvp 安装失败" }
+                $rc = Invoke-EmbeddedPip @(
+                    'install', $nvp, '--prefer-binary',
+                    '--index-url', 'https://pypi.tuna.tsinghua.edu.cn/simple'
+                )
+                if ($rc -ne 0) { Write-Warn "    $nvp 安装失败" }
             }
             # Verify DLLs landed in site-packages\nvidia\
             $nvDir = Join-Path $PythonDir "Lib\site-packages\nvidia"
@@ -466,14 +392,14 @@ Write-Info "  已删除 $($testDirs.Count) 个测试目录"
 
 # 卸载 speech-rego 运行时不需要的第三方包（须在删除 pip 之前；最终以删目录为准）
 if ($PruneUnusedDeps) {
-    Write-Info "  裁剪冗余依赖（onnxruntime / HF 下载加速 / CLI 等）..."
+    Write-Info "  裁剪冗余依赖（HF 下载加速 / CLI 等；保留 onnxruntime 供 Silero VAD）..."
     $pipMod = Join-Path $siteDir "pip"
     if (Test-Path $pipMod) {
         $prevEap = $ErrorActionPreference
         $ErrorActionPreference = 'Continue'
         try {
             foreach ($pipName in @(
-                    'onnxruntime', 'onnxruntime-gpu', 'onnxruntime-directml',
+                    'onnxruntime-gpu', 'onnxruntime-directml',
                     'hf-xet', 'onnx'
                 )) {
                 & $PyExe -m pip uninstall $pipName -y --quiet 2>&1 | Out-Null
@@ -483,7 +409,7 @@ if ($PruneUnusedDeps) {
         }
     }
     $pruneDirs = @(
-        'onnxruntime', 'hf_xet', 'typer', 'rich', 'pygments', 'shellingham',
+        'hf_xet', 'typer', 'rich', 'pygments', 'shellingham',
         'annotated_doc', 'markdown_it', 'mdurl', 'colorama', 'flatbuffers',
         'google', 'onnx'
     )
@@ -496,13 +422,11 @@ if ($PruneUnusedDeps) {
         Get-ChildItem $siteDir -Filter "$dirName-*.dist-info" -Directory -ErrorAction SilentlyContinue |
             ForEach-Object { Remove-Item $_.FullName -Recurse -Force -ErrorAction SilentlyContinue }
     }
-    Get-ChildItem $siteDir -Directory -Filter "onnxruntime*.dist-info" -ErrorAction SilentlyContinue |
-        ForEach-Object { Remove-Item $_.FullName -Recurse -Force -ErrorAction SilentlyContinue }
     # 验证核心 import
     $verifyPy = Join-Path $env:TEMP "speech_reco_verify_$PID.py"
     @'
 import sys
-mods = ("websockets", "sounddevice", "numpy", "faster_whisper", "ctranslate2", "vosk", "zhconv")
+mods = ("websockets", "sounddevice", "numpy", "faster_whisper", "ctranslate2", "zhconv", "pypinyin")
 failed = []
 for m in mods:
     try:
@@ -510,9 +434,9 @@ for m in mods:
     except Exception as e:
         failed.append("%s: %s" % (m, e))
 try:
-    from speech_vad import create_webrtc_vad
-    if create_webrtc_vad(2) is None:
-        failed.append("webrtcvad: create_webrtc_vad returned None")
+    from speech_vad import create_silero_vad
+    if create_silero_vad(0.5) is None:
+        failed.append("silero: create_silero_vad returned None")
 except Exception as e:
     failed.append("speech_vad: %s" % e)
 if failed:
@@ -529,7 +453,7 @@ print("IMPORT_OK")
     else { Write-Warn "  裁剪后 import 校验失败，请检查是否误删依赖" }
 }
 
-# 删除 pip / wheel；保留 setuptools（webrtcvad 等运行时可能需要 pkg_resources）
+# 删除 pip / wheel；保留 setuptools（部分包运行时可能需要 pkg_resources）
 foreach ($pkg in @("pip", "wheel", "_distutils_hack")) {
     $pkgPath = Join-Path $siteDir $pkg
     if (Test-Path $pkgPath) {
@@ -684,62 +608,21 @@ Whisper 模型 '$WhisperModel' 下载不完整（snapshot 中无 model.bin）。
     Write-Fail "缓存中未找到模型: $modelKey`n请检查网络/HF 镜像后重新构建。"
 }
 
-# ── STEP 6: Vosk model ─────────────────────────────────────────────────────────
-if ($IncludeVosk) {
-    Write-Step 6 "下载 Vosk 中文模型（$CN_MODEL）"
+# ── STEP 6: openWakeWord models ────────────────────────────────────────────────
+if ($IncludeOWW) {
+    Write-Step 6 "下载 openWakeWord 内置模型"
+    $owwPkgModels = Join-Path $PythonDir "Lib\site-packages\openwakeword\resources\models"
 
-    $voskCached = Join-Path $VoskCacheDir $CN_MODEL   # persistent cache location
-    $voskDest   = Join-Path $ModelsDir $CN_MODEL      # output package location
-    $voskZip    = Join-Path $VoskCacheDir "$CN_MODEL.zip"
-       Write-Ok "Vosk 模型缓存：$voskCached"
-    if (Test-Path $voskCached) {
-        Write-Ok "Vosk 模型已在缓存中，跳过下载：$CN_MODEL"
+    $owwCached = @(Get-ChildItem $OWWCacheDir -Filter "*.onnx" -ErrorAction SilentlyContinue)
+    if ($owwCached.Count -gt 0) {
+        Write-Ok "openwakeword 模型已缓存（$($owwCached.Count) 个），跳过下载"
+        New-Item -ItemType Directory -Force -Path $owwPkgModels | Out-Null
+        robocopy $OWWCacheDir $owwPkgModels /E /NFL /NDL /NJH /NJS /NC /NS /NP | Out-Null
+        Write-Ok "openwakeword 模型已从缓存复制到包内"
     } else {
-        Write-Info "缓存未命中，开始下载 $CN_URL ..."
-        $ok = $true
-        try {
-            if (Get-Command curl.exe -ErrorAction SilentlyContinue) {
-                & curl.exe -L --progress-bar -o $voskZip $CN_URL
-                $ok = $LASTEXITCODE -eq 0
-            } else {
-                Invoke-WebRequest -Uri $CN_URL -OutFile $voskZip -UseBasicParsing
-            }
-        } catch { $ok = $false; Write-Warn "下载失败：$_" }
-
-        if ($ok -and (Test-Path $voskZip)) {
-            Write-Info "解压到缓存..."
-            Expand-Archive -Path $voskZip -DestinationPath $VoskCacheDir -Force
-            Remove-Item $voskZip -Force
-            Write-Ok "Vosk 中文模型已缓存"
-        } else {
-            Write-Warn "Vosk 模型下载失败。可手动下载后放入 models\ 目录。"
-        }
-    }
-
-    # Copy from persistent cache into output package
-    if (Test-Path $voskCached) {
-        Write-Info "从缓存复制 Vosk 模型到输出包..."
-        robocopy $voskCached $voskDest /E /NFL /NDL /NJH /NJS /NC /NS /NP | Out-Null
-        Write-Ok "Vosk 中文模型已复制到 models\$CN_MODEL\"
-    }
-
-    # Pre-fetch openwakeword built-in models (only if OWW was installed)
-    if ($IncludeOWW) {
-        $owwPkgModels = Join-Path $PythonDir "Lib\site-packages\openwakeword\resources\models"
-
-        # Check persistent cache first
-        $owwCached = @(Get-ChildItem $OWWCacheDir -Filter "*.onnx" -ErrorAction SilentlyContinue)
-        if ($owwCached.Count -gt 0) {
-            Write-Ok "openwakeword 模型已缓存（$($owwCached.Count) 个），跳过下载"
-            # Restore from cache into package — create dir if pip didn't include it
-            New-Item -ItemType Directory -Force -Path $owwPkgModels | Out-Null
-            robocopy $OWWCacheDir $owwPkgModels /E /NFL /NDL /NJH /NJS /NC /NS /NP | Out-Null
-            Write-Ok "openwakeword 模型已从缓存复制到包内"
-        } else {
-            Write-Info "下载 openwakeword 内置模型（从 GitHub，首次约需 1-2 分钟）..."
-            # Download to default package location (openwakeword reads models from there)
-            $owwPy = Join-Path $env:TEMP "oww_dl_$PID.py"
-            @'
+        Write-Info "下载 openwakeword 内置模型（从 GitHub，首次约需 1-2 分钟）..."
+        $owwPy = Join-Path $env:TEMP "oww_dl_$PID.py"
+        @'
 import warnings; warnings.filterwarnings("ignore")
 try:
     import openwakeword
@@ -751,33 +634,34 @@ try:
     print("  openwakeword: %d models in %s" % (n, models_dir))
 except Exception as e:
     print("  [skip] " + str(e))
+    raise SystemExit(1)
 '@ | Set-Content $owwPy -Encoding UTF8
-            & $PyExe $owwPy
-            Remove-Item $owwPy -Force -ErrorAction SilentlyContinue
+        & $PyExe $owwPy
+        if ($LASTEXITCODE -ne 0) {
+            Write-Warn "openwakeword 模型下载失败，唤醒词可能不可用"
+        }
+        Remove-Item $owwPy -Force -ErrorAction SilentlyContinue
 
-            # Back up downloaded models to persistent cache
-            if (Test-Path $owwPkgModels) {
-                $downloaded = @(Get-ChildItem $owwPkgModels -Filter "*.onnx" -ErrorAction SilentlyContinue)
-                if ($downloaded.Count -gt 0) {
-                    robocopy $owwPkgModels $OWWCacheDir /E /NFL /NDL /NJH /NJS /NC /NS /NP | Out-Null
-                    Write-Ok "openwakeword 模型已缓存（$($downloaded.Count) 个）"
-                } else {
-                    Write-Warn "openwakeword 模型下载后仍为空，唤醒词将回退到 Whisper 模式"
-                }
+        if (Test-Path $owwPkgModels) {
+            $downloaded = @(Get-ChildItem $owwPkgModels -Filter "*.onnx" -ErrorAction SilentlyContinue)
+            if ($downloaded.Count -gt 0) {
+                robocopy $owwPkgModels $OWWCacheDir /E /NFL /NDL /NJH /NJS /NC /NS /NP | Out-Null
+                Write-Ok "openwakeword 模型已缓存（$($downloaded.Count) 个）"
+            } else {
+                Write-Warn "openwakeword 模型下载后仍为空"
             }
         }
     }
 } else {
-    Write-Step 6 "跳过 Vosk 模型（IncludeVosk=False）"
+    Write-Step 6 "跳过 openWakeWord 模型（IncludeOWW=False，无唤醒词功能）"
 }
 
 # ── STEP 7: Application files ──────────────────────────────────────────────────
 Write-Step 7 "复制应用程序源文件"
 
 $appFiles = @(
-    "server.py", "engine.py",
-    "server_whisper.py", "engine_whisper.py", "whisper_local.py", "speech_vad.py",
-    "text_postprocess.py", "wake_word_match.py", "wake_detectors.py",
+    "server.py", "engine.py", "whisper_local.py", "speech_vad.py",
+    "text_postprocess.py", "wake_config.py", "wake_detectors.py", "wake_gating.py",
     "index.html", "config.json",
     "list_devices.py", "check_env.py",
     "verify_install.py"
@@ -796,12 +680,14 @@ foreach ($f in $appFiles) {
 $cfgOut = Join-Path $OutputDir "config.json"
 try {
     $cfg = Get-Content $cfgOut -Raw -Encoding UTF8 | ConvertFrom-Json
-    if ($IncludeVosk) {
-        $cfg.asr.model_path = "models/$CN_MODEL"
-    }
-    # Use the standard HF model name — HF_HOME in start_whisper.bat points
-    # to the bundled models\hf\ cache, so no network access is needed.
     $cfg.whisper.model = [string]$WhisperModel
+    if ($cfg.PSObject.Properties.Name -contains 'asr') {
+        $cfg.PSObject.Properties.Remove('asr')
+    }
+    if ($cfg.wake_word.PSObject.Properties.Name -contains 'mode') {
+        $cfg.wake_word.PSObject.Properties.Remove('mode')
+    }
+    $cfg.port = 8765
     $json = $cfg | ConvertTo-Json -Depth 12
     $utf8 = New-Object System.Text.UTF8Encoding $true
     [System.IO.File]::WriteAllText($cfgOut, $json, $utf8)
@@ -813,8 +699,8 @@ try {
 # ── STEP 8: Launch scripts ─────────────────────────────────────────────────────
 Write-Step 8 "生成启动脚本"
 
-# start_whisper.bat (ASCII only -- cmd.exe breaks on UTF-8 BOM / UTF-8 comments)
-Write-CmdBat (Join-Path $OutputDir "start_whisper.bat") @"
+# start.bat (ASCII only -- cmd.exe breaks on UTF-8 BOM / UTF-8 comments)
+Write-CmdBat (Join-Path $OutputDir "start.bat") @"
 @echo off
 chcp 65001 >nul
 setlocal enabledelayedexpansion
@@ -829,31 +715,11 @@ cd /d "%~dp0"
 for /d %%P in ("%~dp0python\Lib\site-packages\nvidia\*") do (
     if exist "%%P\bin\" set "PATH=%%P\bin;!PATH!"
 )
-title Speech Reco Whisper ws://127.0.0.1:8766
+title Speech Reco ws://127.0.0.1:8765
 echo.
 echo  ================================================
-echo    Speech Recognition (Whisper)  port 8766
+echo    Speech Recognition  port 8765
 echo    Model: $WhisperModel
-echo    Press Ctrl+C to stop
-echo  ================================================
-echo.
-echo y | "%~dp0python\python.exe" "%~dp0server_whisper.py"
-echo.
-echo Service stopped.
-pause
-"@
-
-Write-CmdBat (Join-Path $OutputDir "start_vosk.bat") @"
-@echo off
-chcp 65001 >nul
-setlocal
-set PYTHONIOENCODING=utf-8
-set PYTHONUTF8=1
-cd /d "%~dp0"
-title Speech Reco Vosk ws://127.0.0.1:8765
-echo.
-echo  ================================================
-echo    Speech Recognition (Vosk)  port 8765
 echo    Press Ctrl+C to stop
 echo  ================================================
 echo.
@@ -877,7 +743,7 @@ title Environment check
 pause
 "@
 
-Write-Ok "start_whisper.bat / start_vosk.bat / check_env.bat 已生成"
+Write-Ok "start.bat / check_env.bat 已生成"
 
 # STEP 9: README (from UTF-8 template file -- avoids Chinese here-strings in this .ps1)
 $buildTime    = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
@@ -888,7 +754,7 @@ if (Test-Path -LiteralPath $readmeTpl) {
     $readmeText = [System.IO.File]::ReadAllText($readmeTpl, $utf8NoBom)
     $readmeText = $readmeText.Replace("{WhisperModel}", $WhisperModel).
         Replace("{GPU}", $GPU).Replace("{PY_VER}", $PY_VER).
-        Replace("{CN_MODEL}", $CN_MODEL).Replace("{BuildTime}", $buildTime)
+        Replace("{BuildTime}", $buildTime)
     [System.IO.File]::WriteAllText($readmeOut, $readmeText, $utf8NoBom)
 } else {
     $fallback = @(
@@ -915,5 +781,5 @@ Write-Host ""
 Write-Host "  部署步骤:"
 Write-Host "    1. 将 '$OutputDir' 整个文件夹复制到目标机器"
 Write-Host "    2. 运行 check_env.bat 验证环境"
-Write-Host "    3. 运行 start_whisper.bat 启动服务"
+Write-Host "    3. 运行 start.bat 启动服务"
 Write-Host ""
