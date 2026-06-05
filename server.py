@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-语音识别 WebSocket 服务：openWakeWord + Silero VAD + faster-whisper。
+语音识别 WebSocket 服务：Sherpa KWS + Silero VAD + faster-whisper。
 
 Usage:
   python server.py
@@ -33,11 +33,17 @@ _DEFAULTS: dict = {
     "port": 8765,
     "wake_word": {
         "enabled":     True,
-        "keywords":    ["hey jarvis"],
-        "oww_models":  ["hey_jarvis"],
-        "oww_inference_framework": "onnx",
-        "oww_vad_threshold": 0,
-        "oww_debounce_sec": 0.8,
+        "keywords":    ["小智"],
+        "sensitivity": 0.5,
+        "sherpa_kws": {
+            "model_dir": "models/sherpa-kws/sherpa-onnx-kws-zipformer-zh-en-3M-2025-12-20",
+            "chunk_size": 8,
+            "use_int8": True,
+            "provider": "cpu",
+            "num_threads": 2,
+            "keywords_file": "",
+            "debounce_sec": 0.8,
+        },
         "pause_until_listen": False,
         "wake_repeat_cooldown_ms": 1500,
         "sensitivity": 0.5,
@@ -384,7 +390,7 @@ class SpeechServer:
             "state":                  self.engine.state.value,
             "wake_word_enabled":      ww.get("enabled", True),
             "keywords":               ww.get("keywords", []),
-            "mode":                   "openwakeword",
+            "mode":                   "sherpa_kws",
             "whisper_max_silence_ms": w.get("max_silence_ms", 2500),
             "whisper_min_listen_ms":  w.get("min_listen_ms", 600),
             "whisper_max_listen_ms":  w.get("max_listen_ms", 30000),

@@ -9,11 +9,13 @@
 
 ```
 WebSocket 客户端
-    ↕ SpeechServer (server_whisper.py / server.py)
-    ↕ SpeechEngine (engine_whisper.py / engine.py)
-    ├─ 唤醒: WakeUtteranceGate + wake_detectors.*
-    ├─ 判停: speech_vad.SileroVADSession (Whisper 路径)
-    └─ 后处理: text_postprocess.postprocess_transcript
+    ↕ SpeechServer (server.py)
+    ↕ SpeechEngine (engine.py)
+    ├─ 唤醒: Sherpa KWS + WakeUtteranceGate
+    ├─ 判停: speech_vad.SileroVADSession
+    └─ ASR: faster-whisper + text_postprocess
+
+**VAD 说明与调参**：见 [VAD.md](VAD.md)
 ```
 
 **状态机**（`EngineState`）：
@@ -29,7 +31,8 @@ WebSocket 客户端
 
 ## wake_gating.py — `WakeUtteranceGate`
 
-过滤「背景连续说话里误匹配关键词」的门控。
+过滤「背景连续说话里误匹配关键词」的门控。默认用 RMS，可选 Silero（`gate_use_silero`）。  
+详见 [VAD.md §②](VAD.md#-唤醒门控wakeutterancegate默认不用-silero)。
 
 | 方法 | 说明 |
 |------|------|
@@ -60,34 +63,34 @@ WebSocket 客户端
 
 ## wake_detectors.py — 唤醒检测器
 
-三种检测器统一接口：
+`SherpaKWSWakeWordDetector` 统一接口：
 
 | 方法 | 说明 |
 |------|------|
-| `process(audio_bytes) -> Optional[str]` | 处理一块 PCM；命中返回 keyword |
-| `reset()` | 重置内部状态 |
+| `process(audio_bytes) -> Optional[str]` | 处理一块 PCM int16；命中返回 keyword |
+| `reset()` | 重置 KeywordSpotter stream |
 | `pause()` / `resume()` | 暂停/恢复（`pause_until_listen=true` 时用） |
-| `flush() -> Optional[str]` | 刷出尾部（Vosk 专用） |
+| `flush() -> Optional[str]` | 无尾刷（Sherpa 流式实时解码） |
 
-### `OpenWakeWordWakeWordDetector`
+### `SherpaKWSWakeWordDetector`
 
-- openWakeWord ONNX/tflite 分数型唤醒
-- 缓冲至 1280 样本再 `predict`
-- `last_score` 属性：最近一次命中分数
+- sherpa-onnx `KeywordSpotter` 流式 KWS
+- 配置见 `wake_word.sherpa_kws`（model_dir、keywords_threshold 等）
+- 未指定 `keywords_file` 时调用 `sherpa-onnx-cli text2token` 生成
+- `last_score` 属性：命中时为 1.0
 
-### `VoskWakeWordDetector`
+辅助函数：
 
-- Vosk 语法表 + 整句/ partial 匹配
-- 依赖 `wake_word_match.match_wake_text`
-
-### `WhisperWakeWordDetector`
-
-- 2.5s 滑窗 + faster-whisper 转写 + 文本匹配
-- 无 VAD，CPU 开销较大
+| 函数 | 说明 |
+|------|------|
+| `resolve_sherpa_model_paths(cfg, base_dir)` | 解析 encoder/decoder/joiner/tokens 路径 |
+| `build_sherpa_keywords_file(keywords, cfg, paths, cache_dir)` | 生成或缓存 tokenized keywords.txt |
 
 ---
 
 ## speech_vad.py — Silero VAD（ASR 判停）
+
+> 完整流程、配置与调参：[VAD.md §①](VAD.md#-asr-判停主路径必装-silero-vad)
 
 | 符号 | 说明 |
 |------|------|
@@ -115,35 +118,9 @@ WebSocket 客户端
 
 ---
 
-## engine.py — `SpeechEngine`（Vosk ASR）
+## engine.py — `SpeechEngine`
 
-Vosk 流式识别 + 唤醒（openWakeWord / Vosk）。
-
-### 公开方法
-
-| 方法 | 说明 |
-|------|------|
-| `__init__(config, event_callback)` | `event_callback(dict)` 发事件 |
-| `start()` | 后台线程启动麦克风循环 |
-| `stop()` | 停止并释放麦克风 |
-| `trigger_listen()` | 进入 LISTENING（手动或唤醒后） |
-| `cancel_listen()` | 取消当前识别 |
-| `suppress_input(duration_ms)` | 忽略麦克风 N ms（TTS 回声） |
-| `update_config(key, value)` | 运行时改 config 点路径 |
-
-### 内部要点
-
-| 方法 | 说明 |
-|------|------|
-| `_run()` | 主循环：加载 Vosk、建唤醒器、sounddevice 回调 |
-| `_set_state(state)` | 状态变更 + 发 `status` 事件 |
-| `_finalize(rec, reason)` | Vosk 一句结束，发 `transcript` / `listening_end` |
-
----
-
-## engine_whisper.py — `SpeechEngine`（Whisper ASR）
-
-Whisper 批量识别 + 多模式唤醒；模型缓存在 stop/start 间保留。
+Sherpa KWS 唤醒 + Silero 判停 + faster-whisper ASR；模型缓存在 stop/start 间保留。
 
 ### 公开方法
 
@@ -173,13 +150,15 @@ Whisper 批量识别 + 多模式唤醒；模型缓存在 stop/start 间保留。
 |----|------|
 | `pause_until_listen` | false=可重复 wake_word；true=须 listen 后恢复扫描 |
 | `wake_repeat_cooldown_ms` | 两次 wake_word 最短间隔 |
-| `oww_vad_threshold` | 建议 0；>0 易触发 ONNX 形状错误 |
+| `sherpa_kws.model_dir` | Sherpa KWS 模型目录 |
+| `sherpa_kws.keywords_threshold` | 触发阈值（null 时由 sensitivity 映射） |
+| `sherpa_kws.debounce_sec` | 命中后冷却时间 |
 
 ---
 
-## server_whisper.py — `SpeechServer`
+## server.py — `SpeechServer`
 
-Whisper 版 WebSocket 服务（默认端口 8766）。
+WebSocket 服务（默认端口 8765）。
 
 | 方法 | 说明 |
 |------|------|

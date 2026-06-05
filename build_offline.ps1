@@ -8,12 +8,12 @@
 .DESCRIPTION
     输出文件夹包含:
       python\      Python 3.11 嵌入式运行时 + 所有 pip 依赖
-      models\      Whisper 模型 HuggingFace 本地缓存 + openWakeWord 模型
+      models\      Whisper 模型 HuggingFace 本地缓存 + Sherpa KWS 模型
       *.py         应用程序源码（server.py / engine.py 等）
       config.json  配置文件（已自动调整路径）
       start.bat / check_env.bat
 
-    技术栈: openWakeWord 唤醒 + Silero VAD 判停 + faster-whisper ASR
+    技术栈: Sherpa KWS 唤醒 + Silero VAD 判停 + faster-whisper ASR
 
     目标机器系统要求:
       - Windows 10 Build 1809+ / Windows 11 (x64)
@@ -30,8 +30,9 @@
     cuda  — NVIDIA CUDA（需目标机器有 CUDA 12）
     dml   — DirectML / DirectX 12（AMD / Intel / NVIDIA，无需 CUDA）
 
-.PARAMETER IncludeOWW
-    是否安装 openwakeword 并下载内置唤醒模型（默认: $true）
+.PARAMETER IncludeKWS
+    是否安装 sherpa-onnx 并下载 Sherpa KWS 模型（默认: $true）
+    别名: IncludeOWW（兼容旧参数名）
 
 .PARAMETER BundleNvidiaCuda
     是否将 nvidia-cublas / nvidia-cudnn 等 CUDA 运行库打包进部署包（默认: $false）
@@ -44,8 +45,8 @@
 .EXAMPLE
     .\build_offline.ps1 -WhisperModel tiny -GPU none
         # 约最小体积：CPU + tiny 模型
-    .\build_offline.ps1 -WhisperModel small -GPU cuda -IncludeOWW $false
-        # 不打包 openWakeWord（无唤醒词功能）
+    .\build_offline.ps1 -WhisperModel small -GPU cuda -IncludeKWS $false
+        # 不打包 Sherpa KWS（无唤醒词功能）
     .\build_offline.ps1 -PruneUnusedDeps $false
         # 保留 pip 拉取的全部依赖（调试用）
     .\build_offline.ps1 -WhisperModel small -GPU cuda -OutputDir D:\deploy
@@ -55,11 +56,16 @@ param(
     [string] $WhisperModel    = "small",
     [ValidateSet("none","cuda","dml","auto")]
     [string] $GPU             = "auto",
-    [bool]   $IncludeOWW      = $true,
+    [Alias("IncludeOWW")]
+    [bool]   $IncludeKWS      = $true,
     [bool]   $BundleNvidiaCuda = $false, # 是否打包 nvidia-* CUDA 运行库（约 800MB）；false=目标机需自行安装 CUDA Toolkit
     [bool]   $PruneUnusedDeps  = $true,  # 构建后卸载 onnxruntime / hf_xet / HF CLI 等运行时不需要的包
     [string] $OutputDir       = ""
 )
+
+if ($PSBoundParameters.ContainsKey("IncludeOWW")) {
+    $IncludeKWS = [bool]$IncludeOWW
+}
 
 $ErrorActionPreference = "Stop"
 $ProgressPreference    = "SilentlyContinue"
@@ -96,6 +102,92 @@ function Invoke-EmbeddedPip {
     } finally {
         $ErrorActionPreference = $prevEap
     }
+}
+
+# 校验下载文件存在且体积合理；过小/损坏则删除并返回 $false
+function Test-DownloadComplete {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [long]$MinBytes = 1MB
+    )
+    if (-not (Test-Path -LiteralPath $Path)) { return $false }
+    try {
+        $len = (Get-Item -LiteralPath $Path).Length
+    } catch {
+        return $false
+    }
+    if ($len -lt $MinBytes) {
+        Write-Warn "  文件过小或未完成 ($len bytes < $MinBytes)，删除: $Path"
+        Remove-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
+        return $false
+    }
+    return $true
+}
+
+# 多 URL + 重试下载；curl 失败时回退 Invoke-WebRequest
+function Invoke-RobustDownload {
+    param(
+        [Parameter(Mandatory)][string[]]$Urls,
+        [Parameter(Mandatory)][string]$OutFile,
+        [long]$MinBytes = 1MB,
+        [int]$MaxRetries = 3
+    )
+    $dir = Split-Path -Parent $OutFile
+    if ($dir -and -not (Test-Path $dir)) {
+        New-Item -ItemType Directory -Force -Path $dir | Out-Null
+    }
+    if (Test-DownloadComplete -Path $OutFile -MinBytes $MinBytes) {
+        $mb = [int]((Get-Item -LiteralPath $OutFile).Length / 1MB)
+        Write-Info "使用已缓存文件：$OutFile (${mb} MB)"
+        return $true
+    }
+    Remove-Item -LiteralPath $OutFile -Force -ErrorAction SilentlyContinue
+
+    foreach ($url in $Urls) {
+        for ($attempt = 1; $attempt -le $MaxRetries; $attempt++) {
+            Write-Info "  下载 ($attempt/$MaxRetries): $url"
+            Remove-Item -LiteralPath $OutFile -Force -ErrorAction SilentlyContinue
+            $ok = $false
+            $prevEap = $ErrorActionPreference
+            $ErrorActionPreference = 'Continue'
+            try {
+                if (Get-Command curl.exe -ErrorAction SilentlyContinue) {
+                    & curl.exe -L --fail --retry 2 --retry-delay 3 `
+                        --connect-timeout 30 --max-time 7200 `
+                        -o $OutFile $url 2>&1 | Out-Null
+                    if ($LASTEXITCODE -eq 0 -and (Test-DownloadComplete -Path $OutFile -MinBytes $MinBytes)) {
+                        $ok = $true
+                    } else {
+                        Remove-Item -LiteralPath $OutFile -Force -ErrorAction SilentlyContinue
+                    }
+                }
+                if (-not $ok) {
+                    Invoke-WebRequest -Uri $url -OutFile $OutFile -UseBasicParsing -TimeoutSec 7200
+                    if (Test-DownloadComplete -Path $OutFile -MinBytes $MinBytes) {
+                        $ok = $true
+                    } else {
+                        Remove-Item -LiteralPath $OutFile -Force -ErrorAction SilentlyContinue
+                    }
+                }
+            } catch {
+                Write-Warn "  下载失败: $_"
+                Remove-Item -LiteralPath $OutFile -Force -ErrorAction SilentlyContinue
+            } finally {
+                $ErrorActionPreference = $prevEap
+            }
+            if ($ok) {
+                $mb = [int]((Get-Item -LiteralPath $OutFile).Length / 1MB)
+                Write-Ok "  下载完成 (${mb} MB)"
+                return $true
+            }
+            if ($attempt -lt $MaxRetries) {
+                $wait = 5 * $attempt
+                Write-Info "  ${wait}s 后重试..."
+                Start-Sleep -Seconds $wait
+            }
+        }
+    }
+    return $false
 }
 
 # ── GPU auto-detection ────────────────────────────────────────────────────────
@@ -164,7 +256,16 @@ if (-not $OutputDir) {
 # Re-running the build reuses cached models (no re-download).
 $CacheDir      = Join-Path $ScriptDir ".offline-cache"
 $WModelCacheHF = Join-Path $CacheDir "hf"         # HuggingFace / Whisper cache
-$OWWCacheDir   = Join-Path $CacheDir "oww-models"  # openwakeword 模型缓存
+$SherpaKwsCacheDir = Join-Path $CacheDir "sherpa-kws"
+$SHERPA_KWS_NAME   = "sherpa-onnx-kws-zipformer-zh-en-3M-2025-12-20"
+$SHERPA_KWS_URL    = "https://github.com/k2-fsa/sherpa-onnx/releases/download/kws-models/$SHERPA_KWS_NAME.tar.bz2"
+# GitHub 直连不稳定时优先镜像（国内常见 reset/超时）
+$SHERPA_KWS_URLS   = @(
+    "https://ghfast.top/$SHERPA_KWS_URL",
+    "https://mirror.ghproxy.com/$SHERPA_KWS_URL",
+    $SHERPA_KWS_URL
+)
+$SHERPA_KWS_TAR_MIN_BYTES = 5MB
 $PipCacheDir   = Join-Path $CacheDir "pip-cache"   # pip wheel 缓存（自动被 pip 使用）
 
 $PY_VER     = "3.11.9"
@@ -187,7 +288,7 @@ Write-Host "  输出目录      : $OutputDir"
 Write-Host "  模型缓存      : $CacheDir"
 Write-Host "  Whisper 模型  : $WhisperModel"
 Write-Host "  GPU 模式      : $GPU"
-Write-Host "  包含 OWW      : $IncludeOWW"
+Write-Host "  包含 KWS     : $IncludeKWS"
 Write-Host "  打包 NVIDIA   : $BundleNvidiaCuda"
 Write-Host $border -ForegroundColor Cyan
 
@@ -195,7 +296,7 @@ Write-Host $border -ForegroundColor Cyan
 Write-Step 1 "准备输出目录"
 
 # Ensure persistent cache dirs exist (never removed)
-foreach ($d in @($CacheDir, $WModelCacheHF, $OWWCacheDir, $PipCacheDir)) {
+foreach ($d in @($CacheDir, $WModelCacheHF, $SherpaKwsCacheDir, $PipCacheDir)) {
     New-Item -ItemType Directory -Force -Path $d | Out-Null
 }
 # pip respects PIP_CACHE_DIR automatically — all pip install calls use the cache
@@ -307,27 +408,24 @@ if ($LASTEXITCODE -ne 0) {
 Remove-Item $svCheck -Force -ErrorAction SilentlyContinue
 Write-Ok "Silero VAD 已校验"
 
-# openwakeword: 先尝试 --only-binary（最快，无需编译）；
-# 若失败（microvad 等 native dep 无 wheel），回退 --no-deps 只装核心包，VAD 禁用但唤醒词仍可用。
-if ($IncludeOWW) {
-    Write-Info "  pip install openwakeword>=0.6.0"
-    $rc = Invoke-EmbeddedPip @('install', 'openwakeword>=0.6.0', '--only-binary=:all:')
-    if ($rc -eq 0) {
-        Write-Ok "  openwakeword 安装成功"
+# sherpa-onnx: KeywordSpotter 唤醒
+if ($IncludeKWS) {
+    Write-Info "  pip install sherpa-onnx>=1.10.0"
+    $rc = Invoke-EmbeddedPip @('install', 'sherpa-onnx>=1.10.0', '--prefer-binary')
+    if ($rc -ne 0) {
+        Write-Warn "  sherpa-onnx 安装失败，唤醒词功能将不可用"
     } else {
-        Write-Warn "  全量安装失败（microvad 无 wheel）→ 回退安装核心包"
-        $rc = Invoke-EmbeddedPip @(
-            'install', 'openwakeword>=0.6.0', '--no-deps', '--prefer-binary'
-        ) -Quiet
-        Invoke-EmbeddedPip @('install', 'tqdm', 'requests', 'scipy', '--prefer-binary') -Quiet
-        if ($rc -ne 0) {
-            Write-Warn "  openwakeword 安装失败，唤醒词功能将不可用"
-        } else {
-            Write-Ok "  openwakeword 核心包安装成功"
-        }
+        Write-Ok "  sherpa-onnx 安装成功"
+    }
+    Write-Info "  pip install sentencepiece (text2token 依赖)"
+    $rc = Invoke-EmbeddedPip @('install', 'sentencepiece>=0.2.0', '--prefer-binary')
+    if ($rc -ne 0) {
+        Write-Warn "  sentencepiece 安装失败，运行时生成唤醒词 keywords 将不可用"
+    } else {
+        Write-Ok "  sentencepiece 安装成功"
     }
 } else {
-    Write-Info "  跳过 openwakeword（IncludeOWW=False）"
+    Write-Info "  跳过 sherpa-onnx（IncludeKWS=False）"
 }
 
 switch ($GPU) {
@@ -608,52 +706,120 @@ Whisper 模型 '$WhisperModel' 下载不完整（snapshot 中无 model.bin）。
     Write-Fail "缓存中未找到模型: $modelKey`n请检查网络/HF 镜像后重新构建。"
 }
 
-# ── STEP 6: openWakeWord models ────────────────────────────────────────────────
-if ($IncludeOWW) {
-    Write-Step 6 "下载 openWakeWord 内置模型"
-    $owwPkgModels = Join-Path $PythonDir "Lib\site-packages\openwakeword\resources\models"
+# ── STEP 6: Sherpa KWS model ───────────────────────────────────────────────────
+if ($IncludeKWS) {
+    Write-Step 6 "下载 Sherpa KWS 模型（$SHERPA_KWS_NAME）"
+    $sherpaOutDir = Join-Path $ModelsDir "sherpa-kws\$SHERPA_KWS_NAME"
+    $sherpaCached = Join-Path $SherpaKwsCacheDir $SHERPA_KWS_NAME
+    $tokensCached = Join-Path $sherpaCached "tokens.txt"
 
-    $owwCached = @(Get-ChildItem $OWWCacheDir -Filter "*.onnx" -ErrorAction SilentlyContinue)
-    if ($owwCached.Count -gt 0) {
-        Write-Ok "openwakeword 模型已缓存（$($owwCached.Count) 个），跳过下载"
-        New-Item -ItemType Directory -Force -Path $owwPkgModels | Out-Null
-        robocopy $OWWCacheDir $owwPkgModels /E /NFL /NDL /NJH /NJS /NC /NS /NP | Out-Null
-        Write-Ok "openwakeword 模型已从缓存复制到包内"
-    } else {
-        Write-Info "下载 openwakeword 内置模型（从 GitHub，首次约需 1-2 分钟）..."
-        $owwPy = Join-Path $env:TEMP "oww_dl_$PID.py"
-        @'
-import warnings; warnings.filterwarnings("ignore")
-try:
-    import openwakeword
-    openwakeword.utils.download_models()
-    import os, glob
-    pkg_dir = os.path.dirname(openwakeword.__file__)
-    models_dir = os.path.join(pkg_dir, "resources", "models")
-    n = len(glob.glob(os.path.join(models_dir, "*.onnx")))
-    print("  openwakeword: %d models in %s" % (n, models_dir))
-except Exception as e:
-    print("  [skip] " + str(e))
-    raise SystemExit(1)
-'@ | Set-Content $owwPy -Encoding UTF8
-        & $PyExe $owwPy
-        if ($LASTEXITCODE -ne 0) {
-            Write-Warn "openwakeword 模型下载失败，唤醒词可能不可用"
-        }
-        Remove-Item $owwPy -Force -ErrorAction SilentlyContinue
+    if (-not (Test-Path $tokensCached)) {
+        $tarName = "$SHERPA_KWS_NAME.tar.bz2"
+        $tarPath = Join-Path $SherpaKwsCacheDir $tarName
 
-        if (Test-Path $owwPkgModels) {
-            $downloaded = @(Get-ChildItem $owwPkgModels -Filter "*.onnx" -ErrorAction SilentlyContinue)
-            if ($downloaded.Count -gt 0) {
-                robocopy $owwPkgModels $OWWCacheDir /E /NFL /NDL /NJH /NJS /NC /NS /NP | Out-Null
-                Write-Ok "openwakeword 模型已缓存（$($downloaded.Count) 个）"
-            } else {
-                Write-Warn "openwakeword 模型下载后仍为空"
+        if (-not (Test-DownloadComplete -Path $tarPath -MinBytes $SHERPA_KWS_TAR_MIN_BYTES)) {
+            Write-Info "Sherpa KWS 模型包未缓存或文件不完整，开始下载..."
+            $dlOk = Invoke-RobustDownload `
+                -Urls $SHERPA_KWS_URLS `
+                -OutFile $tarPath `
+                -MinBytes $SHERPA_KWS_TAR_MIN_BYTES `
+                -MaxRetries 3
+            if (-not $dlOk) {
+                Write-Fail @"
+Sherpa KWS 模型下载失败（已尝试 GitHub 直连与镜像）。
+
+请手动下载后放到下列路径，再重新运行 build_offline.bat：
+  $tarPath
+
+直链：
+  $($SHERPA_KWS_URLS[0])
+
+镜像示例（浏览器或下载工具）：
+  $($SHERPA_KWS_URLS[1])
+"@
             }
+        } else {
+            $mb = [int]((Get-Item -LiteralPath $tarPath).Length / 1MB)
+            Write-Info "使用本地缓存：$tarPath (${mb} MB)"
         }
+
+        Write-Info "解压 Sherpa KWS 模型..."
+        $extractPy = Join-Path $env:TEMP "sherpa_extract_$PID.py"
+        @'
+import os, sys, tarfile
+tar_path = r"__TAR__"
+out_dir = r"__OUT__"
+if not os.path.isfile(tar_path):
+    print("ERROR: tar missing:", tar_path, file=sys.stderr)
+    sys.exit(1)
+try:
+    with tarfile.open(tar_path, "r:bz2") as tf:
+        tf.extractall(out_dir)
+except Exception as e:
+    print("ERROR: extract failed:", e, file=sys.stderr)
+    sys.exit(2)
+tokens = os.path.join(out_dir, "__NAME__", "tokens.txt")
+if not os.path.isfile(tokens):
+    print("ERROR: tokens.txt not found:", tokens, file=sys.stderr)
+    sys.exit(3)
+print("extract ok:", tokens)
+'@.Replace('__TAR__', ($tarPath -replace '\\', '/')).
+            Replace('__OUT__', ($SherpaKwsCacheDir -replace '\\', '/')).
+            Replace('__NAME__', $SHERPA_KWS_NAME) |
+            Set-Content $extractPy -Encoding ASCII
+        & $PyExe $extractPy
+        $extractRc = $LASTEXITCODE
+        Remove-Item $extractPy -Force -ErrorAction SilentlyContinue
+        if ($extractRc -ne 0) {
+            Write-Warn "解压失败，删除可能损坏的 tar 包以便下次重下..."
+            Remove-Item -LiteralPath $tarPath -Force -ErrorAction SilentlyContinue
+            Write-Fail "Sherpa KWS 解压失败（exit=$extractRc）。请检查网络后重试，或手动解压到：`n  $SherpaKwsCacheDir"
+        }
+        if (-not (Test-Path $tokensCached)) {
+            Write-Fail "Sherpa KWS 解压后未找到 tokens.txt：$tokensCached"
+        }
+        Write-Ok "Sherpa KWS 模型已缓存"
+    } else {
+        Write-Ok "Sherpa KWS 模型已在缓存中，跳过下载"
     }
+
+    New-Item -ItemType Directory -Force -Path $sherpaOutDir | Out-Null
+    robocopy $sherpaCached $sherpaOutDir /E /NFL /NDL /NJH /NJS /NC /NS /NP | Out-Null
+    Write-Ok "Sherpa KWS 模型已打包到 models\sherpa-kws\$SHERPA_KWS_NAME"
+
+    # 预生成默认唤醒词 keywords.txt（小智）
+    $kwCache = Join-Path $sherpaOutDir ".keywords-cache"
+    New-Item -ItemType Directory -Force -Path $kwCache | Out-Null
+    $kwGenPy = Join-Path $env:TEMP "sherpa_kwgen_$PID.py"
+    @'
+import sys
+sys.path.insert(0, r"__SCRIPT_DIR__")
+from pathlib import Path
+from wake_detectors import build_sherpa_keywords_file, resolve_sherpa_model_paths
+base = Path(r"__OUT__")
+cfg = {
+    "model_dir": str(base),
+    "chunk_size": 8,
+    "use_int8": True,
+    "tokens_type": "phone+ppinyin",
+    "lexicon": "en.phone",
+}
+paths = resolve_sherpa_model_paths(cfg, base.parent.parent)
+out = build_sherpa_keywords_file(["小智"], cfg, paths, cache_dir=Path(r"__KW_CACHE__"))
+print("keywords:", out)
+'@.Replace('__SCRIPT_DIR__', ($ScriptDir -replace '\\', '/')).
+        Replace('__OUT__', ($sherpaOutDir -replace '\\', '/')).
+        Replace('__KW_CACHE__', ($kwCache -replace '\\', '/')) |
+        Set-Content $kwGenPy -Encoding ASCII
+    & $PyExe $kwGenPy
+    if ($LASTEXITCODE -ne 0) {
+        Write-Warn "默认 keywords.txt 生成失败（首次启动时会重试 text2token）"
+    } else {
+        Write-Ok "默认唤醒词 keywords 已预生成"
+    }
+    Remove-Item $kwGenPy -Force -ErrorAction SilentlyContinue
 } else {
-    Write-Step 6 "跳过 openWakeWord 模型（IncludeOWW=False，无唤醒词功能）"
+    Write-Step 6 "跳过 Sherpa KWS 模型（IncludeKWS=False，无唤醒词功能）"
 }
 
 # ── STEP 7: Application files ──────────────────────────────────────────────────

@@ -1,7 +1,7 @@
 """
-语音识别引擎：openWakeWord 唤醒 → Silero VAD 判停 → faster-whisper ASR。
+语音识别引擎：Sherpa KWS 唤醒 → Silero VAD 判停 → faster-whisper ASR。
 
-详见 docs/CORE_API.md
+VAD 说明见 docs/VAD.md（ASR 判停 + 唤醒门控）。
 """
 
 import json
@@ -12,6 +12,7 @@ import re
 import threading
 import time
 from enum import Enum
+from pathlib import Path
 from typing import Any, Callable, List, Optional
 
 import numpy as np
@@ -24,7 +25,7 @@ from speech_vad import (
     trim_trailing_silence_chunks,
 )
 from text_postprocess import get_postprocess_config, postprocess_transcript
-from wake_detectors import OpenWakeWordWakeWordDetector
+from wake_detectors import SherpaKWSWakeWordDetector
 from wake_gating import WakeUtteranceGate
 from wake_config import get_wake_word_options
 from whisper_local import (
@@ -307,7 +308,12 @@ def _still_speaking_for_end(
     sample_rate: int,
     vad_fraction: float,
 ) -> bool:
-    """End-of-utterance: Silero speech fraction in chunk."""
+    """
+    LISTENING 判停：当前麦克风块是否仍算「在说话」。
+
+    委托 speech_vad.chunk_is_speech；min_fraction 通常为 silero_end_speech_fraction。
+    连续若干块返回 False 且满足 min_listen_ms / min_transcribe_sec 后结束录音。
+    """
     if speech_vad is None:
         return False
     return chunk_is_speech(
@@ -319,6 +325,7 @@ def _still_speaking_for_end(
 
 
 def _reset_speech_vad(vad: Any) -> None:
+    """LISTENING 开始/结束或回 IDLE 时重置 Silero RNN 状态，避免句间污染。"""
     if vad is not None and hasattr(vad, "reset"):
         vad.reset()
 
@@ -551,7 +558,7 @@ class EngineState(Enum):
 
 class SpeechEngine:
     """
-    Whisper 批量 ASR 引擎：openWakeWord 唤醒 + Silero VAD 判停 + faster-whisper。
+    Whisper 批量 ASR 引擎：Sherpa KWS 唤醒 + Silero VAD 判停 + faster-whisper。
     """
 
     def __init__(self, config: dict, event_callback: Callable[[dict], None]):
@@ -688,7 +695,7 @@ class SpeechEngine:
             "state":                 state.value,
             "wake_word_enabled":     ww.get("enabled", True),
             "keywords":              ww.get("keywords", []),
-            "mode":                  "openwakeword",
+            "mode":                  "sherpa_kws",
             "whisper_max_silence_ms": w.get("max_silence_ms", 2500),
             "whisper_min_listen_ms":  w.get("min_listen_ms", 600),
             "whisper_max_listen_ms":  w.get("max_listen_ms", 30000),
@@ -870,6 +877,11 @@ class SpeechEngine:
     ):
         """
         LISTENING 结束：裁剪首尾静音/回声 → Whisper 转写 → 后处理 → 发事件。
+
+        VAD 用法（docs/VAD.md §①）：
+          - 判停已在 LISTENING 循环完成；此处用同一 speech_vad 做尾静音裁剪
+          - trim_trailing_silence_chunks 阈值 ≈ silero_speech_fraction * 0.75
+          - 裁后过静则回退缓冲，避免 Whisper 收到空段
 
         依次 emit transcript（若有）或 transcript_empty，最后 listening_end。
         """
@@ -1059,13 +1071,17 @@ class SpeechEngine:
         # ── Wake word detector ─────────────────────────────────────────────
         ww_enabled = cfg_ww.get("enabled", True)
         ww_opts    = get_wake_word_options(cfg_ww)
+        sk = ww_opts["sherpa_kws"]
         ww_key = (
             tuple(ww_opts["keywords"]),
             sensitivity,
-            tuple(ww_opts["oww_models"]),
-            ww_opts["oww_inference_framework"],
-            ww_opts["oww_vad_threshold"],
-            ww_opts["oww_debounce_sec"],
+            sk.get("model_dir"),
+            sk.get("chunk_size"),
+            sk.get("use_int8"),
+            sk.get("provider"),
+            sk.get("keywords_file"),
+            sk.get("keywords_threshold"),
+            ww_opts["sherpa_debounce_sec"],
         )
         if self._ww_detector is not None and self._ww_key == ww_key:
             logger.info("[preload] Wake word detector already loaded — skipping.")
@@ -1074,15 +1090,13 @@ class SpeechEngine:
             if ww_enabled and ww_opts["keywords"]:
                 kw = ww_opts["keywords"]
                 try:
-                    oww_models = ww_opts["oww_models"] or None
-                    ww_detector = OpenWakeWordWakeWordDetector(
+                    ww_detector = SherpaKWSWakeWordDetector(
                         kw,
                         _WHISPER_SAMPLE_RATE,
-                        oww_models=oww_models,
+                        sherpa_cfg=ww_opts["sherpa_kws"],
                         sensitivity=sensitivity,
-                        inference_framework=ww_opts["oww_inference_framework"],
-                        vad_threshold=ww_opts["oww_vad_threshold"],
-                        debounce_sec=ww_opts["oww_debounce_sec"],
+                        debounce_sec=ww_opts["sherpa_debounce_sec"],
+                        base_dir=Path(__file__).resolve().parent,
                     )
                 except Exception as exc:
                     logger.error("[preload] Wake word init failed: %s", exc)
@@ -1096,7 +1110,7 @@ class SpeechEngine:
             self._ww_key      = ww_key
             logger.info(
                 "[preload] Wake word: " + ("enabled" if ww_enabled else "disabled")
-                + (" [openwakeword]" if ww_enabled else "")
+                + (" [sherpa_kws]" if ww_enabled else "")
             )
 
     # ── Main audio pipeline ───────────────────────────────────────────────────
@@ -1246,6 +1260,8 @@ class SpeechEngine:
                     _listen_noise_floor: float            = energy_threshold * 0.5
                     _listen_silent_chunks: int           = 0
                     _listen_clock_after_grace: bool        = False
+                    # ── ASR 判停 VAD（docs/VAD.md §①）────────────────────────
+                    # 麦克风流生命周期内一个 SileroVADSession；LISTENING 判停 + _finalize 尾裁
                     _speech_vad = create_silero_vad(
                         silero_threshold, sample_rate=sample_rate
                     )
@@ -1346,6 +1362,7 @@ class SpeechEngine:
                             _ww_enabled = self.config["wake_word"].get("enabled", True)
 
                             if _ww_enabled and not self._wake_paused_until_listen:
+                                # Gate 记录 RMS 历史；可选 speech_vad 见 gate_use_silero
                                 _ww_gate.push(
                                     audio_bytes,
                                     level,
@@ -1362,7 +1379,7 @@ class SpeechEngine:
                                 and not self._wake_paused_until_listen
                             ):
                                 detected = _ww_det.process(audio_bytes)
-                                logger.info(f"try process wake_word : bytes {len(audio_bytes)}   ,result: {detected}")
+                                # logger.info(f"try process wake_word : bytes {len(audio_bytes)}   ,result: {detected}")
 
                                 if detected:
                                     ok, why = _ww_gate.may_accept_wake(
@@ -1479,6 +1496,7 @@ class SpeechEngine:
                                 _listen_clock_after_grace = False
 
                             w_cfg = self.config.get("whisper", {})
+                            # 判停阈值宜低于 silero_speech_fraction，避免句尾气音未结束就停
                             silero_end_frac = float(
                                 w_cfg.get(
                                     "silero_end_speech_fraction",
@@ -1506,6 +1524,7 @@ class SpeechEngine:
                                 silero_end_frac,
                             )
 
+                            # 连续「非 speech」块达到 max_silence_ms → silence 结束
                             if still_speaking:
                                 silence_start = None
                                 _listen_silent_chunks = 0

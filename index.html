@@ -383,18 +383,18 @@
     <div class="card">
       <div class="card-title">运行时配置</div>
 
-      <div id="modeHint" class="config-hint hint-openwakeword">
-        openWakeWord 唤醒 + Silero VAD 判停 + faster-whisper 识别
+      <div id="modeHint" class="config-hint hint-sherpa-kws">
+        Sherpa KWS 唤醒 + Silero VAD 判停 + faster-whisper 识别
       </div>
 
       <div class="config-row">
         <label>唤醒词</label>
-        <input type="text" id="cfgKeyword" value="hey jarvis" placeholder="hey jarvis 或 小智"
+        <input type="text" id="cfgKeyword" value="小智" placeholder="小智 或 LIGHT UP"
                onkeydown="keywordEnterApply(event)">
         <button type="button" class="btn btn-ghost btn-sm" onclick="applyKeyword()">应用</button>
       </div>
       <div class="config-hint" style="border-color:var(--border)">
-        openWakeWord 用 <code style="color:var(--primary)">oww_models</code> 指定模型名（如 <code>hey_jarvis</code>）或 .onnx 路径；多个词用英文逗号分隔。
+        Sherpa KWS 支持中英文唤醒词；多个词用英文逗号分隔。变更后会自动 text2token 重建检测器。
       </div>
 
       <div class="config-row">
@@ -648,8 +648,6 @@
     if (!raw) return;
     const kws = raw.split(',').map(s => s.trim()).filter(Boolean);
     send({ cmd: 'config', key: 'wake_word.keywords', value: kws });
-    const owwModels = kws.map(k => k.toLowerCase().replace(/\s+/g, '_').replace(/-/g, '_'));
-    send({ cmd: 'config', key: 'wake_word.oww_models', value: owwModels });
     try { localStorage.setItem(LS_KEYWORDS, raw); } catch (_) {}
     logEvent('system', '唤醒词已更新: ' + kws.join(', ') + '（已保存并重建检测器，连接保持）');
   }

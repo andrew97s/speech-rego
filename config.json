@@ -1,77 +1,185 @@
 {
+
     "host": "127.0.0.1",
+
     "port": 8765,
+
     "auto_stop_without_clients_ms": 60000,
+
     "wake_word": {
+
         "enabled": true,
-        "keywords": ["hey jarvis"],
-        "oww_models": ["hey_jarvis"],
-        "oww_inference_framework": "onnx",
-        "oww_vad_threshold": 0,
-        "oww_debounce_sec": 0.8,
-        "pause_until_listen": false,
-        "wake_repeat_cooldown_ms": 1500,
+
+        "keywords": ["小智"],
+
         "sensitivity": 0.5,
-        "require_pre_silence_ms": 350,
-        "pre_silence_min_ratio": 0.65,
-        "pre_silence_level_ratio": 0.32,
-        "gate_use_silero": false,
-        "max_wake_utterance_ms": 1400
-    },
-    "whisper": {
-        "model": "small",
-        "language": "zh",
-        "device": "cuda",
-        "compute_type": "float16",
-        "partial_interval_ms": 0,
-        "verbatim": true,
-        "verbatim_use_prompt": false,
-        "temperature": 0,
-        "max_silence_ms": 1500,
-        "silero_threshold": 0.5,
-        "silero_speech_fraction": 0.2,
-        "silero_end_speech_fraction": 0.12,
-        "max_listen_ms": 30000,
-        "vad_cooldown_ms": 500,
-        "vad_min_speech_ms": 200,
-        "min_listen_ms": 1000,
-        "min_transcribe_sec": 1.5,
-        "asr_max_no_speech_prob": 0.58,
-        "compression_ratio_threshold": 2.0,
-        "hallucination_silence_threshold": 1.5,
-        "short_utterance_guard_sec": 6.0,
-        "max_chars_per_second": 7,
-        "initial_prompt": null,
-        "domain_keywords": [
-            "首页", "楼栋", "楼层", "房间", "栋", "层",
-            "烟感", "火警", "预警", "故障", "告警", "消控", "消控室",
-            "物联网", "远程", "无线", "IP", "处置", "类型", "区域",
-            "工单", "巡检", "维保", "值守", "勤务", "预案", "演练", "警情"
-        ],
-        "domain_keyword_correct": true,
-        "keyword_correct_mode": "homophone",
-        "post_wake_grace_ms": 3000,
-        "output_simplified": true
-    },
-    "postprocess": {
-        "output_simplified": true,
-        "domain_keyword_correct": true,
-        "keyword_correct_mode": "homophone",
-        "replacements": {
-            "紧情": "警情",
-            "志务": "勤务"
+
+        "sherpa_kws": {
+
+            "model_dir": "models/sherpa-kws/sherpa-onnx-kws-zipformer-zh-en-3M-2025-12-20",
+
+            "chunk_size": 8,
+
+            "use_int8": true,
+
+            "provider": "cpu",
+
+            "num_threads": 2,
+
+            "keywords_file": "",
+
+            "keywords_threshold": null,
+
+            "keywords_score": 1.0,
+
+            "tokens_type": "phone+ppinyin",
+
+            "lexicon": "en.phone",
+
+            "debounce_sec": 0.8,
+
+            "_keywords_note": "keywords 变更后自动 text2token；也可指定预生成的 keywords_file"
+
         },
+
+        "pause_until_listen": false,
+
+        "wake_repeat_cooldown_ms": 1500,
+
+        "require_pre_silence_ms": 350,
+
+        "pre_silence_min_ratio": 0.65,
+
+        "pre_silence_level_ratio": 0.32,
+
+        "gate_use_silero": false,
+
+        "_gate_use_silero_note": "false=门控仅用 RMS(推荐)；true=叠加 Silero，见 docs/VAD.md §②",
+
+        "max_wake_utterance_ms": 1400
+
+    },
+
+    "whisper": {
+
+        "model": "small",
+
+        "language": "zh",
+
+        "device": "cuda",
+
+        "compute_type": "float16",
+
+        "partial_interval_ms": 0,
+
+        "verbatim": true,
+
+        "verbatim_use_prompt": false,
+
+        "temperature": 0,
+
+        "max_silence_ms": 1500,
+
+        "_vad_doc": "Silero 判停参数说明见 docs/VAD.md §①",
+
+        "silero_threshold": 0.5,
+
+        "_silero_threshold_note": "单窗 speech 概率阈值 0.05~0.95，越大越容易判静音",
+
+        "silero_speech_fraction": 0.2,
+
+        "_silero_speech_fraction_note": "块内 speech 窗占比，主要用于 _finalize 尾裁",
+
+        "silero_end_speech_fraction": 0.12,
+
+        "_silero_end_speech_fraction_note": "LISTENING 判停用，宜略低于 silero_speech_fraction",
+
+        "max_listen_ms": 30000,
+
+        "vad_cooldown_ms": 500,
+
+        "vad_min_speech_ms": 200,
+
+        "min_listen_ms": 1000,
+
+        "min_transcribe_sec": 1.5,
+
+        "asr_max_no_speech_prob": 0.58,
+
+        "compression_ratio_threshold": 2.0,
+
+        "hallucination_silence_threshold": 1.5,
+
+        "short_utterance_guard_sec": 6.0,
+
+        "max_chars_per_second": 7,
+
+        "initial_prompt": null,
+
+        "domain_keywords": [
+
+            "首页", "楼栋", "楼层", "房间", "栋", "层",
+
+            "烟感", "火警", "预警", "故障", "告警", "消控", "消控室",
+
+            "物联网", "远程", "无线", "IP", "处置", "类型", "区域",
+
+            "工单", "巡检", "维保", "值守", "勤务", "预案", "演练", "警情"
+
+        ],
+
+        "domain_keyword_correct": true,
+
+        "keyword_correct_mode": "homophone",
+
         "post_wake_grace_ms": 3000,
+
+        "output_simplified": true
+
+    },
+
+    "postprocess": {
+
+        "output_simplified": true,
+
+        "domain_keyword_correct": true,
+
+        "keyword_correct_mode": "homophone",
+
+        "replacements": {
+
+            "紧情": "警情",
+
+            "志务": "勤务"
+
+        },
+
+        "post_wake_grace_ms": 3000,
+
         "suppress_phrases": ["我在", "在呢", "我在呢", "嗯", "啊", "好的"]
+
     },
+
     "audio": {
+
         "device": null,
+
         "sample_rate": 16000,
+
         "chunk_size": 4000,
+
         "energy_threshold": 0.02,
+
         "input_channels": 1,
+
         "stereo_mode": "mix"
+
     },
+
     "log_level": "INFO",
+
     "http_port": 8080
+
 }
+
+

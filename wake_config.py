@@ -1,8 +1,29 @@
-"""唤醒词与 WakeUtteranceGate 配置解析（openWakeWord）。"""
+"""唤醒词与 WakeUtteranceGate 配置解析（Sherpa KWS）。
+
+VAD 相关字段说明见 docs/VAD.md §②（Gate）。
+"""
 
 from __future__ import annotations
 
 from typing import Any, Dict, List
+
+
+_DEFAULT_SHERPA_KWS = {
+    "model_dir": "models/sherpa-kws/sherpa-onnx-kws-zipformer-zh-en-3M-2025-12-20",
+    "chunk_size": 8,
+    "use_int8": True,
+    "epoch_tag": "epoch-13-avg-2",
+    "provider": "cpu",
+    "num_threads": 2,
+    "keywords_file": "",
+    "keywords_threshold": None,
+    "keywords_score": 1.0,
+    "num_trailing_blanks": 1,
+    "max_active_paths": 4,
+    "tokens_type": "phone+ppinyin",
+    "lexicon": "en.phone",
+    "debounce_sec": 0.8,
+}
 
 
 def get_wake_word_options(ww_cfg: dict) -> Dict[str, Any]:
@@ -10,13 +31,23 @@ def get_wake_word_options(ww_cfg: dict) -> Dict[str, Any]:
     解析 config.json 的 wake_word 段。
 
     Returns:
-        keywords、门控参数、openWakeWord 参数等
+        keywords、门控参数、Sherpa KWS 参数等
     """
     keywords = [
         str(k).strip()
-        for k in ww_cfg.get("keywords", ["hey jarvis"])
+        for k in ww_cfg.get("keywords", ["小智"])
         if str(k).strip()
     ]
+
+    raw_sherpa = ww_cfg.get("sherpa_kws") or {}
+    if not isinstance(raw_sherpa, dict):
+        raw_sherpa = {}
+    sherpa_kws = {**_DEFAULT_SHERPA_KWS, **raw_sherpa}
+
+    debounce = float(
+        sherpa_kws.get("debounce_sec", ww_cfg.get("sherpa_debounce_sec", 0.8))
+    )
+
     return {
         "keywords": keywords,
         "sensitivity": float(ww_cfg.get("sensitivity", 0.5)),
@@ -42,17 +73,8 @@ def get_wake_word_options(ww_cfg: dict) -> Dict[str, Any]:
         "max_wake_utterance_ms": max(
             400, int(ww_cfg.get("max_wake_utterance_ms", 1400))
         ),
-        "oww_models": [
-            str(m).strip()
-            for m in (ww_cfg.get("oww_models") or [])
-            if m and str(m).strip()
-        ],
-        "oww_inference_framework": str(
-            ww_cfg.get("oww_inference_framework", "onnx")
-        ).strip().lower()
-        or "onnx",
-        "oww_vad_threshold": float(ww_cfg.get("oww_vad_threshold", 0.0)),
-        "oww_debounce_sec": float(ww_cfg.get("oww_debounce_sec", 0.8)),
+        "sherpa_kws": sherpa_kws,
+        "sherpa_debounce_sec": debounce,
         "pause_until_listen": bool(ww_cfg.get("pause_until_listen", False)),
         "wake_repeat_cooldown_ms": max(
             0, int(ww_cfg.get("wake_repeat_cooldown_ms", 1500))

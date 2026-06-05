@@ -1,10 +1,17 @@
 """
-Whisper 听句结束判停用的 Silero VAD（ONNX）。
+LISTENING 听句结束判停用的 Silero VAD（ONNX）。
 
-由 engine 在 LISTENING 态使用。
-详见 docs/CORE_API.md#speech_vadpy--silero-vadasr-判停
+本模块是项目中 **ASR 判停的主 VAD**（见 docs/VAD.md §①）：
+  - engine 在打开麦克风流时 create_silero_vad() 得到 SileroVADSession
+  - LISTENING 态每块 PCM 用 chunk_is_speech() 判断是否仍在说话
+  - 连续静音达到 max_silence_ms 后 _finalize()，转写前 trim_trailing_silence_chunks()
+
+与以下无关（勿混淆）：
+  - WakeUtteranceGate 可选 Silero（wake_word.gate_use_silero，默认 false）
+  - faster-whisper transcribe(vad_filter=...)（引擎已关闭）
+
+依赖：silero-vad + onnxruntime。16kHz 下分析窗 512 样本（约 32ms）。
 """
-
 from __future__ import annotations
 
 import logging

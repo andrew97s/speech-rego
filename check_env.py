@@ -63,10 +63,16 @@ def run_checks(config_path: str = "config.json") -> List[Dict]:
 
     # ── 4. Optional backends ──────────────────────────────────────────────────
     try:
-        import openwakeword as oww
-        add("openwakeword", "ok", getattr(oww, "__version__", "已安装"))
+        import sherpa_onnx as sk
+        add("sherpa-onnx", "ok", getattr(sk, "__version__", "已安装"))
     except ImportError:
-        add("openwakeword", "error", "未安装（唤醒词不可用）")
+        add("sherpa-onnx", "error", "未安装（唤醒词不可用）")
+
+    try:
+        import sentencepiece  # noqa: F401
+        add("sentencepiece", "ok", "已安装（Sherpa keywords text2token）")
+    except ImportError:
+        add("sentencepiece", "error", "未安装（Sherpa 唤醒词 keywords 生成不可用）")
 
     try:
         import silero_vad  # noqa: F401
@@ -122,6 +128,23 @@ def run_checks(config_path: str = "config.json") -> List[Dict]:
             cfg = json.loads(cfg_path.read_text(encoding="utf-8-sig"))
 
             whisper_model = cfg.get("whisper", {}).get("model", "base")
+            ww = cfg.get("wake_word", {})
+            sk = ww.get("sherpa_kws") or {}
+            model_dir_name = sk.get(
+                "model_dir",
+                "models/sherpa-kws/sherpa-onnx-kws-zipformer-zh-en-3M-2025-12-20",
+            )
+            sherpa_dir = pathlib.Path(model_dir_name)
+            if not sherpa_dir.is_absolute():
+                sherpa_dir = cfg_path.parent / sherpa_dir
+            tokens = sherpa_dir / "tokens.txt"
+            if tokens.is_file():
+                enc = list(sherpa_dir.glob("encoder-*.onnx"))
+                add("Sherpa KWS 模型", "ok", f"{sherpa_dir.name}（{len(enc)} encoder）")
+            else:
+                add("Sherpa KWS 模型", "warn",
+                    f"未找到 {tokens} — 唤醒词不可用，请下载模型或运行 build_offline.bat")
+
             hf_home = pathlib.Path(
                 os.environ.get("HF_HOME",
                     pathlib.Path.home() / ".cache" / "huggingface")
@@ -230,7 +253,7 @@ def _gpu_check(add):
         providers = ort.get_available_providers()
         if "DmlExecutionProvider" in providers:
             add("DirectML 加速", "ok",
-                "可用 — openwakeword 等 ONNX 模型将自动使用 GPU")
+                "可用 — Sherpa KWS 等 ONNX 模型将自动使用 GPU")
         else:
             if any("GPU" in p or "Dml" in p or "CUDA" in p for p in providers):
                 add("DirectML 加速", "ok", f"GPU provider: {providers}")

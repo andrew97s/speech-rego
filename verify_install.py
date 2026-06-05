@@ -87,7 +87,8 @@ check_import("sounddevice", "0.4.6")
 check_import("numpy", "1.24.0")
 check_import("faster_whisper", "1.0.0")
 check_import("ctranslate2", "4.0.0")
-check_import("openwakeword")
+check_import("sherpa_onnx")
+check_import("sentencepiece")
 check_import("silero_vad")
 
 # ── 3. onnxruntime / GPU providers ───────────────────────────────────────────
@@ -158,7 +159,7 @@ print(f"\n{BOLD}[6] Engine module imports{RESET}")
 
 try:
     from engine import SpeechEngine, EngineState  # noqa: F401
-    from wake_detectors import OpenWakeWordWakeWordDetector  # noqa: F401
+    from wake_detectors import SherpaKWSWakeWordDetector  # noqa: F401
     ok("engine + wake_detectors import OK")
 except Exception as e:
     fail(f"Engine import failed: {e}")

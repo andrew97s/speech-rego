@@ -1,35 +1,158 @@
-"""openWakeWord 唤醒检测器。"""
+"""Sherpa-ONNX KWS 唤醒检测器。
+
+流式 KeywordSpotter：PCM int16 → float32 → accept_waveform / decode_stream。
+关键词需 token 化；未提供 keywords_file 时用 sherpa_onnx.utils.text2token 生成。
+"""
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import time
-from typing import Dict, List, Optional, Tuple
+from pathlib import Path
+from typing import Dict, List, Optional
 
 import numpy as np
 
 logger = logging.getLogger(__name__)
 
 _SAMPLE_RATE = 16000
-_OWW_FRAME_SAMPLES = 1280
-_OWW_VAD_FRAME_SAMPLES = 640
 
 
-def _normalize_oww_model_name(name: str) -> str:
-    return name.strip().lower().replace(" ", "_").replace("-", "_")
-
-
-def _oww_score_threshold(sensitivity: float) -> float:
+def _sherpa_keywords_threshold(sensitivity: float, override: Optional[float]) -> float:
+    if override is not None:
+        return max(0.01, min(1.0, float(override)))
     s = max(0.0, min(1.0, float(sensitivity)))
-    return max(0.15, min(0.85, 0.65 - s * 0.35))
+    return max(0.08, min(0.40, 0.40 - s * 0.30))
 
 
-class OpenWakeWordWakeWordDetector:
+def resolve_sherpa_model_paths(sherpa_cfg: dict, base_dir: Path) -> Dict[str, str]:
+    """Resolve encoder/decoder/joiner/tokens/lexicon paths from sherpa_kws config."""
+    model_dir = Path(str(sherpa_cfg.get("model_dir", ""))).expanduser()
+    if not model_dir.is_absolute():
+        model_dir = (base_dir / model_dir).resolve()
+
+    if not model_dir.is_dir():
+        raise FileNotFoundError(f"Sherpa KWS model_dir not found: {model_dir}")
+
+    chunk = int(sherpa_cfg.get("chunk_size", 8))
+    use_int8 = bool(sherpa_cfg.get("use_int8", True))
+    epoch_tag = str(sherpa_cfg.get("epoch_tag", "epoch-13-avg-2"))
+    cs = f"chunk-{chunk}-left-64"
+
+    def _pick(prefix: str) -> Path:
+        if use_int8 and prefix in ("encoder", "joiner"):
+            int8 = model_dir / f"{prefix}-{epoch_tag}-{cs}.int8.onnx"
+            if int8.is_file():
+                return int8
+        fp32 = model_dir / f"{prefix}-{epoch_tag}-{cs}.onnx"
+        if fp32.is_file():
+            return fp32
+        raise FileNotFoundError(
+            f"Sherpa KWS {prefix} model not found under {model_dir} (chunk={chunk})"
+        )
+
+    tokens = model_dir / "tokens.txt"
+    if not tokens.is_file():
+        raise FileNotFoundError(f"Sherpa KWS tokens.txt not found: {tokens}")
+
+    lexicon_name = str(sherpa_cfg.get("lexicon", "en.phone")).strip()
+    lexicon = model_dir / lexicon_name if lexicon_name else None
+
+    return {
+        "model_dir": str(model_dir),
+        "encoder": str(_pick("encoder")),
+        "decoder": str(_pick("decoder")),
+        "joiner": str(_pick("joiner")),
+        "tokens": str(tokens),
+        "lexicon": str(lexicon) if lexicon and lexicon.is_file() else "",
+    }
+
+
+def build_sherpa_keywords_file(
+    keywords: List[str],
+    sherpa_cfg: dict,
+    model_paths: Dict[str, str],
+    cache_dir: Optional[Path] = None,
+    base_dir: Optional[Path] = None,
+) -> str:
+    """Return path to tokenized keywords.txt (cached or generated via sherpa-onnx-cli)."""
+    explicit = str(sherpa_cfg.get("keywords_file", "") or "").strip()
+    if explicit:
+        p = Path(explicit).expanduser()
+        root = (base_dir or Path.cwd()).resolve()
+        if not p.is_absolute():
+            p = (root / p).resolve()
+        if p.is_file():
+            return str(p)
+        raise FileNotFoundError(f"Sherpa keywords_file not found: {p}")
+
+    if not keywords:
+        raise ValueError("Sherpa KWS requires at least one keyword")
+
+    tokens_type = str(sherpa_cfg.get("tokens_type", "phone+ppinyin")).strip()
+    key_src = "|".join(keywords) + "|" + tokens_type + "|" + model_paths["tokens"]
+    digest = hashlib.sha256(key_src.encode("utf-8")).hexdigest()[:16]
+    cache_root = cache_dir or (Path(model_paths["model_dir"]).parent / ".keywords-cache")
+    cache_root.mkdir(parents=True, exist_ok=True)
+    out_path = cache_root / f"keywords_{digest}.txt"
+    if out_path.is_file() and out_path.stat().st_size > 0:
+        return str(out_path)
+
+    lexicon = model_paths.get("lexicon") or None
+    if lexicon == "":
+        lexicon = None
+
+    try:
+        from sherpa_onnx.utils import text2token
+    except ImportError as exc:
+        raise RuntimeError(
+            "sherpa-onnx is required for keyword tokenization; "
+            "pip install sherpa-onnx sentencepiece"
+        ) from exc
+
+    logger.info(
+        "[WakeWord] Generating Sherpa keywords file (text2token): keywords=%s type=%s",
+        keywords,
+        tokens_type,
+    )
+    try:
+        encoded = text2token(
+            keywords,
+            tokens=model_paths["tokens"],
+            tokens_type=tokens_type,
+            lexicon=lexicon,
+        )
+    except ImportError as exc:
+        raise RuntimeError(
+            "text2token requires sentencepiece (and pypinyin for Chinese): "
+            "pip install sentencepiece pypinyin"
+        ) from exc
+
+    lines_written = 0
+    with out_path.open("w", encoding="utf-8") as f:
+        for kw, toks in zip(keywords, encoded):
+            if not toks:
+                logger.warning("[WakeWord] text2token produced no tokens for %r", kw)
+                continue
+            parts = [str(t) for t in toks] + [f"@{kw}"]
+            f.write(" ".join(parts) + "\n")
+            lines_written += 1
+
+    if lines_written == 0:
+        raise RuntimeError(
+            f"text2token produced no keywords; check tokens_type={tokens_type!r} "
+            f"and lexicon={lexicon!r}"
+        )
+    return str(out_path)
+
+
+class SherpaKWSWakeWordDetector:
     """
-    openWakeWord 分数型唤醒（ONNX）。
+    sherpa-onnx KeywordSpotter 流式唤醒。
 
-    将 PCM 缓冲到 1280 样本(80ms)再推理；命中后 debounce_sec 内不再触发。
-    oww_vad_threshold 建议为 0（ASR 判停用 speech_vad.SileroVADSession）。
+    process() 接收 int16 PCM；命中后 debounce_sec 内不再触发。
+    last_score 在命中时固定为 1.0（Sherpa 不暴露置信度）。
     """
 
     def __init__(
@@ -37,79 +160,107 @@ class OpenWakeWordWakeWordDetector:
         keywords: List[str],
         sample_rate: int = _SAMPLE_RATE,
         *,
-        oww_models: Optional[List[str]] = None,
+        sherpa_cfg: dict,
         sensitivity: float = 0.5,
-        inference_framework: str = "onnx",
-        vad_threshold: float = 0.0,
         debounce_sec: float = 0.8,
+        base_dir: Optional[Path] = None,
     ):
         if sample_rate != _SAMPLE_RATE:
-            raise ValueError(
-                f"openWakeWord requires {_SAMPLE_RATE} Hz, got {sample_rate}"
-            )
-        from openwakeword.model import Model
+            raise ValueError(f"Sherpa KWS requires {_SAMPLE_RATE} Hz, got {sample_rate}")
+
+        import sherpa_onnx
 
         self.keywords = [k.strip() for k in keywords if k.strip()]
-        if not self.keywords and not oww_models:
-            raise ValueError("openWakeWord wake word requires keywords or oww_models")
+        if not self.keywords:
+            raise ValueError("Sherpa KWS requires at least one keyword")
 
-        if oww_models:
-            models = [str(m).strip() for m in oww_models if str(m).strip()]
-        else:
-            models = [_normalize_oww_model_name(k) for k in self.keywords]
-
-        self._score_threshold = _oww_score_threshold(sensitivity)
+        root = Path(base_dir or Path.cwd()).resolve()
+        cfg = dict(sherpa_cfg or {})
         self._debounce_sec = max(0.0, float(debounce_sec))
         self._last_wake = 0.0
         self._last_score = 0.0
         self._paused = False
-        self._pcm_buf = bytearray()
-        self._model_to_keyword: Dict[str, str] = {}
+        self._keyword_map: Dict[str, str] = {}
 
-        fw = (inference_framework or "onnx").strip().lower()
-        vad = max(0.0, float(vad_threshold))
-        if vad > 0:
-            logger.warning(
-                "[WakeWord] oww_vad_threshold=%.2f enables openWakeWord internal "
-                "Silero VAD, which errors on non-640-sample tails; use 0.",
-                vad,
-            )
-        self._model = Model(
-            wakeword_models=models,
-            inference_framework=fw,
-            vad_threshold=vad,
+        model_paths = resolve_sherpa_model_paths(cfg, root)
+        keywords_file = build_sherpa_keywords_file(
+            self.keywords,
+            cfg,
+            model_paths,
+            cache_dir=root / ".cache" / "sherpa-kws",
+            base_dir=root,
         )
-        loaded = list(self._model.models.keys())
-        for i, mdl in enumerate(loaded):
-            kw = self.keywords[i] if i < len(self.keywords) else mdl
-            self._model_to_keyword[mdl] = kw
-        for mdl, mapping in getattr(self._model, "class_mapping", {}).items():
-            for cls in mapping.values():
-                if cls not in self._model_to_keyword:
-                    parent = mdl
-                    idx = loaded.index(parent) if parent in loaded else -1
-                    self._model_to_keyword[cls] = (
-                        self.keywords[idx] if 0 <= idx < len(self.keywords) else cls
-                    )
+        self._parse_keyword_map(keywords_file)
+
+        threshold_override = cfg.get("keywords_threshold")
+        if threshold_override in ("", None):
+            threshold_override = None
+        else:
+            threshold_override = float(threshold_override)
+
+        keywords_threshold = _sherpa_keywords_threshold(sensitivity, threshold_override)
+        provider = str(cfg.get("provider", "cpu")).strip().lower() or "cpu"
+        num_threads = max(1, int(cfg.get("num_threads", 2)))
+
+        logger.info("kws keywords_threshold : %s" , keywords_threshold)
+        self._spotter = sherpa_onnx.KeywordSpotter(
+            tokens=model_paths["tokens"],
+            encoder=model_paths["encoder"],
+            decoder=model_paths["decoder"],
+            joiner=model_paths["joiner"],
+            num_threads=num_threads,
+            max_active_paths=max(1, int(cfg.get("max_active_paths", 4))),
+            keywords_file=keywords_file,
+            keywords_score=float(cfg.get("keywords_score", 1.0)),
+            keywords_threshold=keywords_threshold,
+            num_trailing_blanks=max(0, int(cfg.get("num_trailing_blanks", 1))),
+            provider=provider,
+        )
+        self._stream = self._spotter.create_stream()
+        self._sample_rate = sample_rate
 
         logger.info(
-            "[WakeWord] openWakeWord -- models=%s keywords=%s "
-            "score_threshold=%.2f vad_threshold=%.2f framework=%s",
-            models,
+            "[WakeWord] Sherpa KWS — keywords=%s file=%s threshold=%.2f provider=%s threads=%d",
             self.keywords,
-            self._score_threshold,
-            vad,
-            fw,
+            keywords_file,
+            keywords_threshold,
+            provider,
+            num_threads,
         )
+
+    def _parse_keyword_map(self, keywords_file: str) -> None:
+        """Map detected token lines back to user-facing keyword text (@suffix)."""
+        try:
+            for line in Path(keywords_file).read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if "@" in line:
+                    display = line.rsplit("@", 1)[-1].strip()
+                    if display:
+                        self._keyword_map[display] = display
+                        self._keyword_map[display.lower()] = display
+                parts = line.split()
+                if parts:
+                    tail = parts[-1]
+                    if tail.startswith("@"):
+                        display = tail[1:]
+                        if display:
+                            self._keyword_map[display] = display
+        except OSError as exc:
+            logger.debug("[WakeWord] keyword map parse skipped: %s", exc)
+
+        for kw in self.keywords:
+            self._keyword_map.setdefault(kw, kw)
+            self._keyword_map.setdefault(kw.lower(), kw)
 
     @property
     def last_score(self) -> float:
         return self._last_score
 
     def reset(self):
-        self._model.reset()
+        self._spotter.reset_stream(self._stream)
         self._last_score = 0.0
-        self._pcm_buf.clear()
 
     def pause(self):
         self._paused = True
@@ -119,71 +270,53 @@ class OpenWakeWordWakeWordDetector:
         self._paused = False
         self.reset()
 
-    def _score_predictions(self, predictions: dict) -> Tuple[Optional[str], float]:
-        best_kw: Optional[str] = None
-        best_score = 0.0
-        for model_key, raw_score in predictions.items():
-            score = float(raw_score)
-            if score < self._score_threshold:
-                continue
-            kw = self._model_to_keyword.get(model_key, model_key)
-            if score > best_score:
-                best_score = score
-                best_kw = kw
-        return best_kw, best_score
+    def _normalize_keyword(self, raw: str) -> str:
+        text = (raw or "").strip()
+        if not text:
+            return text
+        if text in self._keyword_map:
+            return self._keyword_map[text]
+        low = text.lower()
+        if low in self._keyword_map:
+            return self._keyword_map[low]
+        for kw in self.keywords:
+            if kw == text or kw.lower() == low:
+                return kw
+        return text
 
     def process(self, audio_bytes: bytes) -> Optional[str]:
         if self._paused:
             return None
         now = time.time()
         if self._debounce_sec > 0 and now - self._last_wake < self._debounce_sec:
+            # logger.error("防抖生效,跳过唤醒词检测")
             return None
 
         if isinstance(audio_bytes, np.ndarray):
-            chunk = (audio_bytes * 32768.0).astype(np.int16)
+            chunk = audio_bytes.astype(np.int16, copy=False)
         else:
             chunk = np.frombuffer(audio_bytes, dtype=np.int16)
         if chunk.size == 0:
+            # logger.error("chunk size 异常")
             return None
 
-        self._pcm_buf.extend(chunk.tobytes())
-        max_bytes = _OWW_FRAME_SAMPLES * 5 * 2
-        if len(self._pcm_buf) > max_bytes:
-            self._pcm_buf = self._pcm_buf[-max_bytes:]
+        samples = chunk.astype(np.float32) / 32768.0
+        self._stream.accept_waveform(self._sample_rate, samples)
 
-        n_samples = len(self._pcm_buf) // 2
-        if n_samples < _OWW_FRAME_SAMPLES:
+        while self._spotter.is_ready(self._stream):
+            self._spotter.decode_stream(self._stream)
+
+        result = self._spotter.get_result(self._stream)
+        if not result:
+            logger.debug("result 为空!")
             return None
 
-        use_n = (n_samples // _OWW_FRAME_SAMPLES) * _OWW_FRAME_SAMPLES
-        pcm = np.frombuffer(bytes(self._pcm_buf[: use_n * 2]), dtype=np.int16)
-        infer = pcm
-        if float(getattr(self._model, "vad_threshold", 0) or 0) > 0:
-            pad = (-use_n) % _OWW_VAD_FRAME_SAMPLES
-            if pad:
-                infer = np.pad(pcm, (0, pad), mode="constant")
-
-        try:
-            predictions = self._model.predict(infer)
-        except Exception as exc:
-            logger.debug("[WakeWord] openWakeWord predict error: %s", exc)
-            return None
-
-        self._pcm_buf = self._pcm_buf[use_n * 2 :]
-
-        best_kw, best_score = self._score_predictions(predictions)
-        if best_kw:
-            self._last_score = best_score
-            self._last_wake = now
-            logger.info(
-                "[WakeWord] openWakeWord matched: %r (score=%.3f)",
-                best_kw,
-                best_score,
-            )
-            self._model.reset()
-            self._pcm_buf.clear()
-            return best_kw
-        return None
+        keyword = self._normalize_keyword(str(result))
+        self._last_score = 1.0
+        self._last_wake = now
+        logger.info("[WakeWord] Sherpa KWS matched: %r (raw=%r)", keyword, result)
+        self._spotter.reset_stream(self._stream)
+        return keyword
 
     def flush(self) -> Optional[str]:
         return None
