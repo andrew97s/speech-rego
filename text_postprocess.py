@@ -349,6 +349,9 @@ def should_suppress_transcript(text: str, phrases: List[str]) -> bool:
     t = normalize_compare(text)
     if not t:
         return True
+    if "请不吝点赞" in text :
+        logger.error("发现异常关键字:%s,屏蔽输出" , text)
+        return True
     for raw in phrases:
         p = normalize_compare(raw)
         if not p:

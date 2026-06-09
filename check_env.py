@@ -132,7 +132,7 @@ def run_checks(config_path: str = "config.json") -> List[Dict]:
             sk = ww.get("sherpa_kws") or {}
             model_dir_name = sk.get(
                 "model_dir",
-                "models/sherpa-kws/sherpa-onnx-kws-zipformer-zh-en-3M-2025-12-20",
+                "models/sherpa-kws/sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01",
             )
             sherpa_dir = pathlib.Path(model_dir_name)
             if not sherpa_dir.is_absolute():

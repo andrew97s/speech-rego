@@ -329,6 +329,42 @@
   .env-summary-ok   { color: var(--success); }
   .env-summary-warn { color: var(--warn); }
   .env-summary-err  { color: var(--danger); }
+
+  /* ── Keyword chips ───────────────────────────────────────────── */
+  .chip-list {
+    display: flex; flex-wrap: wrap; gap: 6px;
+    min-height: 28px; margin-bottom: 8px;
+  }
+  .chip {
+    display: inline-flex; align-items: center; gap: 4px;
+    padding: 3px 8px 3px 10px; border-radius: 14px;
+    background: #1a2240; border: 1px solid var(--primary);
+    color: var(--text); font-size: .78rem;
+  }
+  .chip-remove {
+    background: none; border: none; color: var(--muted);
+    cursor: pointer; font-size: .95rem; line-height: 1;
+    padding: 0 2px; border-radius: 50%;
+  }
+  .chip-remove:hover { color: var(--danger); }
+  .chip-empty {
+    font-size: .74rem; color: var(--muted); padding: 4px 0;
+  }
+
+  /* ── Replacement rules ───────────────────────────────────────── */
+  .repl-list { display: flex; flex-direction: column; gap: 6px; margin-bottom: 8px; }
+  .repl-row {
+    display: flex; align-items: center; gap: 6px;
+  }
+  .repl-row input {
+    flex: 1; min-width: 0;
+    background: var(--bg); border: 1px solid var(--border);
+    border-radius: 5px; padding: 5px 8px;
+    color: var(--text); font-size: .78rem; outline: none;
+  }
+  .repl-row input:focus { border-color: var(--primary); }
+  .repl-arrow { color: var(--muted); font-size: .78rem; flex-shrink: 0; }
+  .repl-empty { font-size: .74rem; color: var(--muted); padding: 4px 0; }
 </style>
 </head>
 <body>
@@ -389,12 +425,17 @@
 
       <div class="config-row">
         <label>唤醒词</label>
-        <input type="text" id="cfgKeyword" value="小智" placeholder="小智 或 LIGHT UP"
-               onkeydown="keywordEnterApply(event)">
-        <button type="button" class="btn btn-ghost btn-sm" onclick="applyKeyword()">应用</button>
+        <input type="text" id="cfgKeywordInput" placeholder="输入后回车或点添加"
+               onkeydown="keywordInputEnter(event)">
+        <button type="button" class="btn btn-ghost btn-sm" onclick="addWakeKeyword()">添加</button>
+      </div>
+      <div class="chip-list" id="keywordChips"></div>
+      <div class="config-row" style="margin-top:0">
+        <label></label>
+        <button type="button" class="btn btn-ghost btn-sm" onclick="applyKeywords()">应用唤醒词</button>
       </div>
       <div class="config-hint" style="border-color:var(--border)">
-        Sherpa KWS 支持中英文唤醒词；多个词用英文逗号分隔。变更后会自动 text2token 重建检测器。
+        支持多个中文唤醒词；含空格的短语会自动转为下划线写入 keywords 文件。添加后点「应用唤醒词」重建检测器。
       </div>
 
       <div class="config-row">
@@ -518,6 +559,24 @@
 
     </div><!-- /whisper card -->
 
+    <!-- Postprocess config -->
+    <div class="card">
+      <div class="card-title">后处理 · 错词替换</div>
+
+      <div class="repl-list" id="replList"></div>
+
+      <div class="config-row" style="margin-top:0">
+        <label></label>
+        <div class="btn-row" style="flex:1">
+          <button type="button" class="btn btn-ghost btn-sm" onclick="addReplacementRow()">+ 添加规则</button>
+          <button type="button" class="btn btn-ghost btn-sm" onclick="applyReplacements()">应用替换</button>
+        </div>
+      </div>
+      <div class="config-hint" style="border-color:var(--border)">
+        识别结果中的错词会被替换为正词（全局匹配）；变更后立即生效，无需重启。
+      </div>
+    </div><!-- /postprocess card -->
+
     <!-- Env check -->
     <div class="card">
       <div class="card-title" style="display:flex;align-items:center;justify-content:space-between;">
@@ -560,18 +619,193 @@
 
 <script>
   // ── State ─────────────────────────────────────────────────────────────────────
-  const LS_KEYWORDS = 'speechreco_wake_keywords';
+  const LS_KEYWORDS     = 'speechreco_wake_keywords';
+  const LS_REPLACEMENTS = 'speechreco_replacements';
+  const DEFAULT_KEYWORDS = ['小智'];
+  const DEFAULT_REPLACEMENTS = { '紧情': '警情', '志务': '勤务' };
+
   let ws = null;
   let engineState = 'stopped';
   let transcripts = [];
+  let wakeKeywords = [...DEFAULT_KEYWORDS];
 
-  (function restoreKeywordsFromStorage() {
+  function loadStoredKeywords() {
     try {
-      const s = localStorage.getItem(LS_KEYWORDS);
-      if (s !== null && document.getElementById('cfgKeyword'))
-        document.getElementById('cfgKeyword').value = s;
+      const raw = localStorage.getItem(LS_KEYWORDS);
+      if (!raw) return;
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed) && parsed.length)
+        wakeKeywords = parsed.map(s => String(s).trim()).filter(Boolean);
+      else if (typeof raw === 'string') {
+        const kws = raw.split(',').map(s => s.trim()).filter(Boolean);
+        if (kws.length) wakeKeywords = kws;
+      }
     } catch (_) {}
-  })();
+  }
+
+  function loadStoredReplacements() {
+    try {
+      const raw = localStorage.getItem(LS_REPLACEMENTS);
+      if (!raw) return DEFAULT_REPLACEMENTS;
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed))
+        return parsed;
+    } catch (_) {}
+    return { ...DEFAULT_REPLACEMENTS };
+  }
+
+  function renderKeywordChips() {
+    const box = document.getElementById('keywordChips');
+    box.innerHTML = '';
+    if (!wakeKeywords.length) {
+      box.innerHTML = '<span class="chip-empty">尚未添加唤醒词</span>';
+      return;
+    }
+    wakeKeywords.forEach((kw, i) => {
+      const chip = document.createElement('span');
+      chip.className = 'chip';
+      chip.innerHTML =
+        escHtml(kw) +
+        '<button type="button" class="chip-remove" title="移除" onclick="removeWakeKeyword(' + i + ')">&times;</button>';
+      box.appendChild(chip);
+    });
+  }
+
+  function keywordInputEnter(ev) {
+    if (ev.key !== 'Enter') return;
+    ev.preventDefault();
+    addWakeKeyword();
+  }
+
+  function addWakeKeyword() {
+    const input = document.getElementById('cfgKeywordInput');
+    const kw = input.value.trim();
+    if (!kw) return;
+    if (wakeKeywords.includes(kw)) {
+      input.value = '';
+      return;
+    }
+    wakeKeywords.push(kw);
+    input.value = '';
+    renderKeywordChips();
+  }
+
+  function removeWakeKeyword(index) {
+    wakeKeywords.splice(index, 1);
+    renderKeywordChips();
+  }
+
+  function applyKeywords() {
+    if (!wakeKeywords.length) {
+      logEvent('error', '请至少添加一个唤醒词');
+      return;
+    }
+    send({ cmd: 'config', key: 'wake_word.keywords', value: [...wakeKeywords] });
+    try { localStorage.setItem(LS_KEYWORDS, JSON.stringify(wakeKeywords)); } catch (_) {}
+    logEvent('system', '唤醒词已更新: ' + wakeKeywords.join(', ') + '（已保存并重建检测器，连接保持）');
+  }
+
+  function setWakeKeywordsFromServer(kws) {
+    if (!Array.isArray(kws)) return;
+    wakeKeywords = kws.map(s => String(s).trim()).filter(Boolean);
+    renderKeywordChips();
+    try { localStorage.setItem(LS_KEYWORDS, JSON.stringify(wakeKeywords)); } catch (_) {}
+  }
+
+  function renderReplacementRows(replObj) {
+    const box = document.getElementById('replList');
+    box.innerHTML = '';
+    const entries = Object.entries(replObj || {});
+    if (!entries.length) {
+      box.innerHTML = '<div class="repl-empty">暂无替换规则，点击「添加规则」</div>';
+      return;
+    }
+    entries.forEach(([from, to], i) => {
+      box.appendChild(createReplacementRow(from, to, i));
+    });
+  }
+
+  function createReplacementRow(from, to, index) {
+    const row = document.createElement('div');
+    row.className = 'repl-row';
+    row.dataset.index = String(index);
+    row.innerHTML =
+      '<input type="text" class="repl-from" placeholder="错词" value="' + escAttr(from || '') + '">' +
+      '<span class="repl-arrow">&rarr;</span>' +
+      '<input type="text" class="repl-to" placeholder="正词" value="' + escAttr(to || '') + '">' +
+      '<button type="button" class="btn btn-ghost btn-sm" title="删除" onclick="removeReplacementRow(this)">&times;</button>';
+    return row;
+  }
+
+  function addReplacementRow(from, to) {
+    const box = document.getElementById('replList');
+    const empty = box.querySelector('.repl-empty');
+    if (empty) empty.remove();
+    const idx = box.querySelectorAll('.repl-row').length;
+    box.appendChild(createReplacementRow(from || '', to || '', idx));
+  }
+
+  function removeReplacementRow(btn) {
+    btn.closest('.repl-row').remove();
+    const box = document.getElementById('replList');
+    if (!box.querySelector('.repl-row'))
+      box.innerHTML = '<div class="repl-empty">暂无替换规则，点击「添加规则」</div>';
+  }
+
+  function collectReplacementsFromUI() {
+    const obj = {};
+    document.querySelectorAll('#replList .repl-row').forEach(row => {
+      const from = row.querySelector('.repl-from').value.trim();
+      const to   = row.querySelector('.repl-to').value.trim();
+      if (from && to) obj[from] = to;
+    });
+    return obj;
+  }
+
+  function applyReplacements() {
+    const repl = collectReplacementsFromUI();
+    send({ cmd: 'config', key: 'postprocess.replacements', value: repl });
+    try { localStorage.setItem(LS_REPLACEMENTS, JSON.stringify(repl)); } catch (_) {}
+    const n = Object.keys(repl).length;
+    logEvent('system', '错词替换已更新（' + n + ' 条规则，立即生效）');
+  }
+
+  function normalizeReplacements(repl) {
+    if (!repl) return {};
+    if (typeof repl === 'object' && !Array.isArray(repl)) return repl;
+    const obj = {};
+    if (Array.isArray(repl)) {
+      repl.forEach(item => {
+        if (Array.isArray(item) && item.length >= 2) {
+          const from = String(item[0]).trim();
+          const to   = String(item[1]).trim();
+          if (from && to) obj[from] = to;
+        } else if (item && typeof item === 'object') {
+          const from = String(item.from || item.src || '').trim();
+          const to   = String(item.to || item.dst || '').trim();
+          if (from && to) obj[from] = to;
+        } else if (typeof item === 'string' && item.includes('=')) {
+          const [from, , to] = item.split('=');
+          if (from.trim() && to.trim()) obj[from.trim()] = to.trim();
+        }
+      });
+    }
+    return obj;
+  }
+
+  function setReplacementsFromServer(repl) {
+    const obj = normalizeReplacements(repl);
+    renderReplacementRows(obj);
+    try { localStorage.setItem(LS_REPLACEMENTS, JSON.stringify(obj)); } catch (_) {}
+  }
+
+  function escAttr(str) {
+    return str.replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;');
+  }
+
+  loadStoredKeywords();
+  renderKeywordChips();
+  renderReplacementRows(loadStoredReplacements());
 
   // ── Connect / disconnect ──────────────────────────────────────────────────────
   function toggleConnect() {
@@ -637,21 +871,6 @@
   }
 
   // ── Config senders ────────────────────────────────────────────────────────────
-  function keywordEnterApply(ev) {
-    if (ev.key !== 'Enter') return;
-    ev.preventDefault();
-    applyKeyword();
-  }
-
-  function applyKeyword() {
-    const raw = document.getElementById('cfgKeyword').value.trim();
-    if (!raw) return;
-    const kws = raw.split(',').map(s => s.trim()).filter(Boolean);
-    send({ cmd: 'config', key: 'wake_word.keywords', value: kws });
-    try { localStorage.setItem(LS_KEYWORDS, raw); } catch (_) {}
-    logEvent('system', '唤醒词已更新: ' + kws.join(', ') + '（已保存并重建检测器，连接保持）');
-  }
-
   function applySensitivity(val) {
     const s = Math.max(0, Math.min(1, Number(val) / 100));
     document.getElementById('cfgSensitivityVal').textContent = s.toFixed(2);
@@ -709,14 +928,10 @@
       setEngineState(msg.state);
       if (msg.wake_word_enabled !== undefined)
         document.getElementById('cfgWWEnabled').checked = msg.wake_word_enabled;
-      if (msg.keywords !== undefined) {
-        document.getElementById('cfgKeyword').value = Array.isArray(msg.keywords)
-          ? msg.keywords.join(', ') : '';
-        try {
-          const t = document.getElementById('cfgKeyword').value.trim();
-          if (t) localStorage.setItem(LS_KEYWORDS, t);
-        } catch (_) {}
-      }
+      if (msg.keywords !== undefined)
+        setWakeKeywordsFromServer(msg.keywords);
+      if (msg.replacements !== undefined)
+        setReplacementsFromServer(msg.replacements);
       if (msg.post_wake_grace_ms !== undefined)
         document.getElementById('cfgPostWakeGrace').value = msg.post_wake_grace_ms;
       if (msg.whisper_max_silence_ms !== undefined)
@@ -750,13 +965,10 @@
 
     } else if (event === 'config_updated') {
       logEvent('system', '配置更新: ' + msg.key + ' = ' + JSON.stringify(msg.value));
-      if (msg.key === 'wake_word.keywords' && msg.value !== undefined) {
-        const el = document.getElementById('cfgKeyword');
-        if (el && Array.isArray(msg.value)) {
-          el.value = msg.value.join(', ');
-          try { localStorage.setItem(LS_KEYWORDS, el.value.trim()); } catch (_) {}
-        }
-      }
+      if (msg.key === 'wake_word.keywords' && msg.value !== undefined)
+        setWakeKeywordsFromServer(msg.value);
+      if (msg.key === 'postprocess.replacements' && msg.value !== undefined)
+        setReplacementsFromServer(msg.value);
       const wfUi = {
         'whisper.post_wake_grace_ms': 'cfgPostWakeGrace',
         'postprocess.post_wake_grace_ms': 'cfgPostWakeGrace',

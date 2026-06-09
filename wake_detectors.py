@@ -19,6 +19,10 @@ logger = logging.getLogger(__name__)
 _SAMPLE_RATE = 16000
 
 
+def _sherpa_keyword_tag(keyword: str) -> str:
+    """Sherpa @ 后缀不能含空格，否则会被当成独立 token 导致 Encode 失败。"""
+    return keyword.strip().replace(" ", "_")
+
 def _sherpa_keywords_threshold(sensitivity: float, override: Optional[float]) -> float:
     if override is not None:
         return max(0.01, min(1.0, float(override)))
@@ -56,7 +60,7 @@ def resolve_sherpa_model_paths(sherpa_cfg: dict, base_dir: Path) -> Dict[str, st
     if not tokens.is_file():
         raise FileNotFoundError(f"Sherpa KWS tokens.txt not found: {tokens}")
 
-    lexicon_name = str(sherpa_cfg.get("lexicon", "en.phone")).strip()
+    lexicon_name = str(sherpa_cfg.get("lexicon", "") or "").strip()
     lexicon = model_dir / lexicon_name if lexicon_name else None
 
     return {
@@ -90,7 +94,7 @@ def build_sherpa_keywords_file(
     if not keywords:
         raise ValueError("Sherpa KWS requires at least one keyword")
 
-    tokens_type = str(sherpa_cfg.get("tokens_type", "phone+ppinyin")).strip()
+    tokens_type = str(sherpa_cfg.get("tokens_type", "ppinyin")).strip()
     key_src = "|".join(keywords) + "|" + tokens_type + "|" + model_paths["tokens"]
     digest = hashlib.sha256(key_src.encode("utf-8")).hexdigest()[:16]
     cache_root = cache_dir or (Path(model_paths["model_dir"]).parent / ".keywords-cache")
@@ -135,7 +139,8 @@ def build_sherpa_keywords_file(
             if not toks:
                 logger.warning("[WakeWord] text2token produced no tokens for %r", kw)
                 continue
-            parts = [str(t) for t in toks] + [f"@{kw}"]
+            tag = _sherpa_keyword_tag(kw)
+            parts = [str(t) for t in toks] + [f"@{tag}"]
             f.write(" ".join(parts) + "\n")
             lines_written += 1
 
@@ -203,6 +208,7 @@ class SherpaKWSWakeWordDetector:
         num_threads = max(1, int(cfg.get("num_threads", 2)))
 
         logger.info("kws keywords_threshold : %s" , keywords_threshold)
+        logger.info("kws keywords_score : %s" , float(cfg.get("keywords_score", 1.0)))
         self._spotter = sherpa_onnx.KeywordSpotter(
             tokens=model_paths["tokens"],
             encoder=model_paths["encoder"],
@@ -212,7 +218,7 @@ class SherpaKWSWakeWordDetector:
             max_active_paths=max(1, int(cfg.get("max_active_paths", 4))),
             keywords_file=keywords_file,
             keywords_score=float(cfg.get("keywords_score", 1.0)),
-            keywords_threshold=keywords_threshold,
+            keywords_threshold=0.1,
             num_trailing_blanks=max(0, int(cfg.get("num_trailing_blanks", 1))),
             provider=provider,
         )
@@ -251,8 +257,12 @@ class SherpaKWSWakeWordDetector:
             logger.debug("[WakeWord] keyword map parse skipped: %s", exc)
 
         for kw in self.keywords:
+            tag = _sherpa_keyword_tag(kw)
             self._keyword_map.setdefault(kw, kw)
             self._keyword_map.setdefault(kw.lower(), kw)
+            if tag != kw:
+                self._keyword_map.setdefault(tag, kw)
+                self._keyword_map.setdefault(tag.lower(), kw)
 
     @property
     def last_score(self) -> float:
@@ -284,12 +294,17 @@ class SherpaKWSWakeWordDetector:
                 return kw
         return text
 
+    def _rebuild_stream(self):
+        """重建一个干净的 stream，彻底清空历史缓冲"""
+        self._stream = self._spotter.create_stream()
+        logger.info("stream 已重建")
+
     def process(self, audio_bytes: bytes) -> Optional[str]:
         if self._paused:
             return None
         now = time.time()
         if self._debounce_sec > 0 and now - self._last_wake < self._debounce_sec:
-            # logger.error("防抖生效,跳过唤醒词检测")
+            logger.error("防抖生效,跳过唤醒词检测")
             return None
 
         if isinstance(audio_bytes, np.ndarray):
@@ -297,25 +312,43 @@ class SherpaKWSWakeWordDetector:
         else:
             chunk = np.frombuffer(audio_bytes, dtype=np.int16)
         if chunk.size == 0:
-            # logger.error("chunk size 异常")
+            logger.error("chunk size 异常")
             return None
 
+        # ✅ 把大 chunk 切成 20ms 小块逐步喂入
+        step = int(self._sample_rate * 0.02)  # 20ms = 320 samples @ 16kHz
+        for i in range(0, len(chunk), step):
+            sub = chunk[i:i+step].astype(np.float32) / 32768.0
+            self._stream.accept_waveform(self._sample_rate, sub)
+
+
+
         samples = chunk.astype(np.float32) / 32768.0
-        self._stream.accept_waveform(self._sample_rate, samples)
+
+        rms = np.sqrt(np.mean(samples**2))
+        logger.debug("chunk: %d samples, %.0fms, RMS=%.4f",
+                     chunk.size,
+                     chunk.size / self._sample_rate * 1000,
+                     rms)
+
+        # self._stream.accept_waveform(self._sample_rate, samples)
 
         while self._spotter.is_ready(self._stream):
             self._spotter.decode_stream(self._stream)
 
         result = self._spotter.get_result(self._stream)
-        if not result:
+
+        if not result or not result.strip():
             logger.debug("result 为空!")
             return None
+        # self._spotter.reset_stream(self._stream)
+        self._rebuild_stream()
 
         keyword = self._normalize_keyword(str(result))
         self._last_score = 1.0
         self._last_wake = now
         logger.info("[WakeWord] Sherpa KWS matched: %r (raw=%r)", keyword, result)
-        self._spotter.reset_stream(self._stream)
+
         return keyword
 
     def flush(self) -> Optional[str]:

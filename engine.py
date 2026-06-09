@@ -690,6 +690,7 @@ class SpeechEngine:
         ww = self.config["wake_word"]
         w  = self.config.get("whisper", {})
         _pp = get_postprocess_config(self.config)
+        _pp_raw = self.config.get("postprocess") or {}
         self.emit({
             "event":                 "status",
             "state":                 state.value,
@@ -700,6 +701,7 @@ class SpeechEngine:
             "whisper_min_listen_ms":  w.get("min_listen_ms", 600),
             "whisper_max_listen_ms":  w.get("max_listen_ms", 30000),
             "post_wake_grace_ms":     int(_pp.get("post_wake_grace_ms", 1500)),
+            "replacements":           _pp_raw.get("replacements") or {},
             "ts":                    time.time(),
         })
 

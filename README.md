@@ -27,14 +27,14 @@ VAD 用法与调参：[docs/VAD.md](docs/VAD.md)
 ## 配置要点（`config.json`）
 
 - `wake_word.keywords`：唤醒词（如 `小智`）；自动经 `sherpa-onnx-cli text2token` 生成 keywords 文件
-- `wake_word.sherpa_kws.model_dir`：Sherpa KWS 模型目录（默认中英 zipformer 3M）
+- `wake_word.sherpa_kws.model_dir`：Sherpa KWS 模型目录（默认 WenetSpeech 纯中文 zipformer 3.3M）
 - `whisper.model` / `device` / `compute_type`：ASR 模型与推理设备
 - `whisper.max_silence_ms`：Silero 判停静音时长
 - `postprocess.replacements`：识别结果词语替换
 
 ## Sherpa KWS 模型
 
-默认模型：[sherpa-onnx-kws-zipformer-zh-en-3M-2025-12-20](https://k2-fsa.github.io/sherpa/onnx/kws/pretrained_models/index.html)
+默认模型：[sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01](https://k2-fsa.github.io/sherpa/onnx/kws/pretrained_models/index.html)（WenetSpeech L 10k 小时纯中文，`tokens_type=ppinyin`）
 
 离线包构建时会自动下载并打包到 `models/sherpa-kws/`。
 

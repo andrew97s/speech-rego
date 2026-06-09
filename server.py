@@ -36,9 +36,12 @@ _DEFAULTS: dict = {
         "keywords":    ["小智"],
         "sensitivity": 0.5,
         "sherpa_kws": {
-            "model_dir": "models/sherpa-kws/sherpa-onnx-kws-zipformer-zh-en-3M-2025-12-20",
-            "chunk_size": 8,
+            "model_dir": "models/sherpa-kws/sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01",
+            "chunk_size": 16,
+            "epoch_tag": "epoch-12-avg-2",
             "use_int8": True,
+            "tokens_type": "ppinyin",
+            "lexicon": "",
             "provider": "cpu",
             "num_threads": 2,
             "keywords_file": "",
@@ -385,6 +388,7 @@ class SpeechServer:
         ww = self.config["wake_word"]
         w  = self.config.get("whisper", {})
         _pp = get_postprocess_config(self.config)
+        _pp_raw = self.config.get("postprocess") or {}
         return {
             "event":                  "status",
             "state":                  self.engine.state.value,
@@ -395,6 +399,7 @@ class SpeechServer:
             "whisper_min_listen_ms":  w.get("min_listen_ms", 600),
             "whisper_max_listen_ms":  w.get("max_listen_ms", 30000),
             "post_wake_grace_ms":     int(_pp.get("post_wake_grace_ms", 1500)),
+            "replacements":           _pp_raw.get("replacements") or {},
             "auto_stop_without_clients_ms": self._auto_stop_ms(),
             "ts":                     time.time(),
         }

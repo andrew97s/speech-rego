@@ -257,7 +257,7 @@ if (-not $OutputDir) {
 $CacheDir      = Join-Path $ScriptDir ".offline-cache"
 $WModelCacheHF = Join-Path $CacheDir "hf"         # HuggingFace / Whisper cache
 $SherpaKwsCacheDir = Join-Path $CacheDir "sherpa-kws"
-$SHERPA_KWS_NAME   = "sherpa-onnx-kws-zipformer-zh-en-3M-2025-12-20"
+$SHERPA_KWS_NAME   = "sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01"
 $SHERPA_KWS_URL    = "https://github.com/k2-fsa/sherpa-onnx/releases/download/kws-models/$SHERPA_KWS_NAME.tar.bz2"
 # GitHub 直连不稳定时优先镜像（国内常见 reset/超时）
 $SHERPA_KWS_URLS   = @(
@@ -265,7 +265,7 @@ $SHERPA_KWS_URLS   = @(
     "https://mirror.ghproxy.com/$SHERPA_KWS_URL",
     $SHERPA_KWS_URL
 )
-$SHERPA_KWS_TAR_MIN_BYTES = 5MB
+$SHERPA_KWS_TAR_MIN_BYTES = 3MB
 $PipCacheDir   = Join-Path $CacheDir "pip-cache"   # pip wheel 缓存（自动被 pip 使用）
 
 $PY_VER     = "3.11.9"
@@ -799,10 +799,11 @@ from wake_detectors import build_sherpa_keywords_file, resolve_sherpa_model_path
 base = Path(r"__OUT__")
 cfg = {
     "model_dir": str(base),
-    "chunk_size": 8,
+    "chunk_size": 16,
+    "epoch_tag": "epoch-12-avg-2",
     "use_int8": True,
-    "tokens_type": "phone+ppinyin",
-    "lexicon": "en.phone",
+    "tokens_type": "ppinyin",
+    "lexicon": "",
 }
 paths = resolve_sherpa_model_paths(cfg, base.parent.parent)
 out = build_sherpa_keywords_file(["小智"], cfg, paths, cache_dir=Path(r"__KW_CACHE__"))

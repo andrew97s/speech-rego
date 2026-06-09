@@ -9,10 +9,10 @@ from typing import Any, Dict, List
 
 
 _DEFAULT_SHERPA_KWS = {
-    "model_dir": "models/sherpa-kws/sherpa-onnx-kws-zipformer-zh-en-3M-2025-12-20",
-    "chunk_size": 8,
+    "model_dir": "models/sherpa-kws/sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01",
+    "chunk_size": 16,
     "use_int8": True,
-    "epoch_tag": "epoch-13-avg-2",
+    "epoch_tag": "epoch-12-avg-2",
     "provider": "cpu",
     "num_threads": 2,
     "keywords_file": "",
@@ -20,8 +20,8 @@ _DEFAULT_SHERPA_KWS = {
     "keywords_score": 1.0,
     "num_trailing_blanks": 1,
     "max_active_paths": 4,
-    "tokens_type": "phone+ppinyin",
-    "lexicon": "en.phone",
+    "tokens_type": "ppinyin",
+    "lexicon": "",
     "debounce_sec": 0.8,
 }
 
