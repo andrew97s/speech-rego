@@ -19,7 +19,7 @@ if not exist ".venv\Scripts\python.exe" (
 )
 
 .venv\Scripts\python.exe -c ^
-  "import onnxruntime as o; p=[x for x in o.get_available_providers() if x!='CPUExecutionProvider']; print('  GPU: '+', '.join(p) if p else '  GPU: CPU only')" ^
+  "import torch; print('  GPU: '+torch.cuda.get_device_name(0) if torch.cuda.is_available() else '  GPU: CPU only')" ^
   2>nul
 
 echo.

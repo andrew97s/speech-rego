@@ -107,7 +107,7 @@ class WakeUtteranceGate:
     | ok | 通过门控，可发 wake_word |
     | disabled | require_pre_silence_ms=0，门控关闭 |
     | no_history | deque 为空（不应在正常使用中出现） |
-    | no_speech_at_wake | 尾部找不到任何 energy_talk/silero_talk 块 |
+    | no_speech_at_wake | 跳过尾静音后仍找不到 energy_talk/silero_talk 块 |
     | utterance_too_long | 从 onset 到当前的 burst 超过 max_wake_utterance_ms |
     | warming_up | deque 长度不足以覆盖 pre_silence 所需块数 |
     | no_pre_silence | onset 前的 pre 窗口安静占比不足 |
@@ -199,6 +199,10 @@ class WakeUtteranceGate:
         energy_talk = level >= energy_threshold * float(
             ww_cfg.get("speech_energy_ratio", 0.38)
         )
+        # 短唤醒词常被 250ms 块里的静音稀释，略低于 energy_threshold 仍算开口
+        if not energy_talk:
+            min_talk = float(ww_cfg.get("speech_level_floor", 0.004))
+            energy_talk = level >= max(min_talk, self._noise_floor * 2.5)
         silero_talk = False
         use_silero = bool(ww_cfg.get("gate_use_silero", False))
         if use_silero and speech_vad is not None:
@@ -219,24 +223,36 @@ class WakeUtteranceGate:
         self._chunks.append((level, energy_talk, silero_talk))
 
     @staticmethod
-    def _speech_burst_start(items: List[_ChunkStat]) -> int:
+    def _speech_burst_start(
+        items: List[_ChunkStat], max_trail_quiet: int = 3,
+    ) -> int:
         """
         从 deque 尾部向前扫描，定位「当前说话突发」的起始块下标 onset。
 
-        从最后一项开始：只要 energy_talk 或 silero_talk 为 True 就继续向前；
-        遇到第一个「既不在 energy 说话也不在 silero 说话」的块后停止。
-        返回 onset = 停止位置 + 1，即 burst 第一块的索引。
+        Sherpa KWS 常在词尾 1～3 块偏静的 PCM 上才解码出 keyword（trailing blanks），
+        因此先跳过最多 max_trail_quiet 块尾静音，再沿 energy_talk/silero_talk 往前找 onset。
 
-        若 deque 尾部全是非说话块，则 onset == len(items)，may_accept_wake
-        会返回 no_speech_at_wake（KWS 命中但门控看不到 accompanying 能量）。
+        若跳过尾静音后仍看不到说话块，返回 len(items) → no_speech_at_wake。
 
-        示例 items（et=energy_talk, 省略 silero）::
+        示例 items（et=energy_talk）::
 
             idx:  0    1    2    3    4    5
-            et:   F    F    T    T    T    T
-                              ↑ onset=2
+            et:   F    F    T    T    T    F     ← KWS 在 t5 命中
+                              ↑ onset=2（跳过尾块 5）
         """
         i = len(items) - 1
+        skipped = 0
+        while i >= 0 and skipped < max(0, int(max_trail_quiet)):
+            _lvl, et, st = items[i]
+            if et or st:
+                break
+            i -= 1
+            skipped += 1
+        if i < 0:
+            return len(items)
+        _lvl, et, st = items[i]
+        if not (et or st):
+            return len(items)
         while i >= 0:
             _lvl, et, st = items[i]
             if et or st:
@@ -289,13 +305,30 @@ class WakeUtteranceGate:
 
         # 唤醒前至少需要多少块「pre 窗口」
         pre_n = max(1, int(pre_ms / max(chunk_ms, 1)))
+        # ~500ms 尾静音：KWS 解码滞后于能量峰值
+        max_trail = max(1, int(500.0 / max(chunk_ms, 1.0)))
         items = list(self._chunks)
 
-        onset = self._speech_burst_start(items)
+        onset = self._speech_burst_start(items, max_trail_quiet=max_trail)
         if onset >= len(items):
+            tail = [
+                round(lvl, 4) for lvl, _, _ in items[-max(4, max_trail) :]
+            ]
+            logger.info(
+                "Wake gate no_speech_at_wake: last_levels=%s "
+                "energy_thr=%.4f (need energy_talk on/near match chunk)",
+                tail,
+                energy_threshold * float(ww_cfg.get("speech_energy_ratio", 0.38)),
+            )
             return False, "no_speech_at_wake"
 
-        burst_len = len(items) - onset
+        last_talk = len(items) - 1
+        while last_talk > onset:
+            _lvl, et, st = items[last_talk]
+            if et or st:
+                break
+            last_talk -= 1
+        burst_len = last_talk - onset + 1
         if burst_len * chunk_ms > max_utt_ms:
             return False, "utterance_too_long"
 

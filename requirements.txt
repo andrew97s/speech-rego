@@ -1,11 +1,10 @@
 websockets>=12.0
 sounddevice>=0.4.6
-numpy>=1.24.0,<2.0.0
-faster-whisper>=1.0.0
-ctranslate2>=4.0.0
+numpy>=1.24.0
+funasr>=1.1.6
+torch>=2.0.0
+torchaudio>=2.0.0
 zhconv>=1.4.3
 pypinyin>=0.49.0
-silero-vad>=5.1.0,<6
-onnxruntime>=1.16.0
 sherpa-onnx>=1.10.0
 sentencepiece>=0.2.0

@@ -271,6 +271,8 @@ class SherpaKWSWakeWordDetector:
     def reset(self):
         self._spotter.reset_stream(self._stream)
         self._last_score = 0.0
+        # 门控拒绝后 engine 会 reset：清防抖，否则同一句被拒后 0.8s 内无法再试
+        self._last_wake = 0.0
 
     def pause(self):
         self._paused = True
@@ -304,7 +306,10 @@ class SherpaKWSWakeWordDetector:
             return None
         now = time.time()
         if self._debounce_sec > 0 and now - self._last_wake < self._debounce_sec:
-            logger.error("防抖生效,跳过唤醒词检测")
+            logger.debug(
+                "debounce skip wake-word scan (%.0f ms left)",
+                (self._debounce_sec - (now - self._last_wake)) * 1000,
+            )
             return None
 
         if isinstance(audio_bytes, np.ndarray):

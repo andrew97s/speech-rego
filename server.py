@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-语音识别 WebSocket 服务：Sherpa KWS + Silero VAD + faster-whisper。
+语音识别 WebSocket 服务：Sherpa KWS + FunASR fsmn-vad + FunASR 中文流式 ASR。
 
 Usage:
   python server.py
@@ -56,31 +56,32 @@ _DEFAULTS: dict = {
         "gate_use_silero": False,
         "max_wake_utterance_ms": 1400,
     },
+    "funasr": {
+        "asr_model": "paraformer-zh-streaming",
+        "vad_model": "fsmn-vad",
+        "punc_model": "ct-punc",
+        "device": "cuda",
+        "ncpu": 4,
+        "chunk_size": [0, 10, 5],
+        "encoder_chunk_look_back": 4,
+        "decoder_chunk_look_back": 1,
+        "vad_chunk_ms": 200,
+        "cache_dir": "models/funasr",
+        "disable_update": True,
+        "hotword": "",
+    },
     "whisper": {
-        "model":               "base",
-        "language":            None,   # None = auto-detect (mixed Chinese/English)
-        "device":              "cpu",
-        "compute_type":        "int8",
+        "language":            "zh",
         "partial_interval_ms": 0,
-        "verbatim":            True,
-        "verbatim_initial_prompt": (
-            "以下是普通话口语的逐字转写。请完整保留说话人的原话，"
-            "不要改写、不要概括、不要省略、不要改成问句或列表。"
-        ),
-        "temperature":         0,
         "max_silence_ms":      2000,
-        "silero_threshold":    0.5,
-        "silero_speech_fraction": 0.2,
         "max_listen_ms":       30000,
         "vad_cooldown_ms":     500,
         "vad_min_speech_ms":   200,
         "min_listen_ms":       1000,
         "min_transcribe_sec":  1.5,
-        "asr_max_no_speech_prob": 0.58,
-        "silero_end_speech_fraction": 0.12,
-        "initial_prompt":      None,   # e.g. "以下是普通话，包含中文、数字和英文字母。"
-        "post_wake_grace_ms":  3000,   # after wake word, ignore mic (TTS echo; use longer with speakers)
-        "output_simplified":   True,   # convert traditional -> simplified Chinese
+        "post_wake_grace_ms":  3000,
+        "output_simplified":   True,
+        "domain_keywords":     [],
     },
     "postprocess": {
         "output_simplified":   True,
@@ -90,7 +91,7 @@ _DEFAULTS: dict = {
     },
     "audio": {
         "device":           None,
-        "sample_rate":      16000,   # ignored for Whisper (always 16 kHz)
+        "sample_rate":      16000,   # FunASR streaming is 16 kHz
         "chunk_size":       4000,
         "energy_threshold": 0.02,
         "input_channels":   1,      # set 2 for stereo mics; downmixed before ASR
@@ -135,21 +136,21 @@ def load_config(path: str = "config.json") -> dict:
     try:
         user = _read_user()
         merged = _deep_merge(_DEFAULTS, user)
-        w = merged.get("whisper", {})
+        f = merged.get("funasr", {})
         log.info(
-            "Loaded %s — whisper.model=%s device=%s compute_type=%s",
+            "Loaded %s — funasr.asr=%s vad=%s device=%s",
             abs_path,
-            w.get("model", "base"),
-            w.get("device", "cpu"),
-            w.get("compute_type", "int8"),
+            f.get("asr_model", "paraformer-zh-streaming"),
+            f.get("vad_model", "fsmn-vad"),
+            f.get("device", "cpu"),
         )
         return merged
     except FileNotFoundError:
-        log.warning("%s not found — using built-in defaults (base/cpu/int8)", abs_path)
+        log.warning("%s not found — using built-in defaults", abs_path)
         return dict(_DEFAULTS)
     except json.JSONDecodeError as exc:
         log.error(
-            "Invalid JSON in %s (%s) — using built-in defaults (base/cpu/int8). "
+            "Invalid JSON in %s (%s) — using built-in defaults. "
             "Fix the file or set SPEECH_REGO_CONFIG to another path.",
             abs_path,
             exc,
@@ -182,7 +183,7 @@ def setup_logging(level: str = "INFO"):
 
 class SpeechServer:
     """
-    Whisper 版 WebSocket 服务：连接管理、命令分发、引擎事件广播。
+    FunASR 流式 WebSocket 服务：连接管理、命令分发、引擎事件广播。
 
     默认端口 8765。
     """
@@ -353,7 +354,7 @@ class SpeechServer:
                 save_config(self.config)
                 # wake_word.* 变更后异步 preload（勿用 create_task(run_in_executor(..))：
                 # run_in_executor 返回 Future，create_task 只接受协程，会 TypeError 导致整条连接被断开）
-                if key.startswith("wake_word.") and self.loop:
+                if (key.startswith("wake_word.") or key.startswith("funasr.")) and self.loop:
                     eng = self.engine
 
                     async def _preload_after_wake():
@@ -387,6 +388,7 @@ class SpeechServer:
         """构造当前引擎与服务配置的 status 事件 dict。"""
         ww = self.config["wake_word"]
         w  = self.config.get("whisper", {})
+        f  = self.config.get("funasr", {})
         _pp = get_postprocess_config(self.config)
         _pp_raw = self.config.get("postprocess") or {}
         return {
@@ -394,7 +396,9 @@ class SpeechServer:
             "state":                  self.engine.state.value,
             "wake_word_enabled":      ww.get("enabled", True),
             "keywords":               ww.get("keywords", []),
-            "mode":                   "sherpa_kws",
+            "mode":                   "funasr_streaming",
+            "asr_model":              f.get("asr_model", "paraformer-zh-streaming"),
+            "vad_model":              f.get("vad_model", "fsmn-vad"),
             "whisper_max_silence_ms": w.get("max_silence_ms", 2500),
             "whisper_min_listen_ms":  w.get("min_listen_ms", 600),
             "whisper_max_listen_ms":  w.get("max_listen_ms", 30000),
@@ -413,9 +417,7 @@ class SpeechServer:
         host     = self.config["host"]
         port     = self.config["port"]
         ww       = self.config["wake_word"]
-        wcfg     = self.config["whisper"]
-        language = wcfg.get("language")
-        lang_str = language if language else "auto (中文/English 混合)"
+        fcfg     = self.config.get("funasr") or {}
 
         border = "=" * 56
         self.logger.info(border)
@@ -424,9 +426,9 @@ class SpeechServer:
         self.logger.info(f"  Wake word  : {'enabled' if ww['enabled'] else 'disabled'}")
         if ww["enabled"]:
             self.logger.info(f"  Keywords   : {', '.join(ww.get('keywords', []))}")
-        self.logger.info(f"  Model      : {wcfg.get('model', 'base')}")
-        self.logger.info(f"  Language   : {lang_str}")
-        self.logger.info(f"  Device     : {wcfg.get('device', 'cpu')} / {wcfg.get('compute_type', 'int8')}")
+        self.logger.info(f"  ASR        : {fcfg.get('asr_model', 'paraformer-zh-streaming')} (streaming zh)")
+        self.logger.info(f"  VAD        : {fcfg.get('vad_model', 'fsmn-vad')}")
+        self.logger.info(f"  Device     : {fcfg.get('device', 'cpu')}")
         http_port = self.config.get("http_port", 8080)
         if http_port:
             self.logger.info(f"  UI         : http://127.0.0.1:{http_port}/index.html")
@@ -439,7 +441,7 @@ class SpeechServer:
             self.logger.info("  Auto-stop  : disabled (auto_stop_without_clients_ms=0)")
         self.logger.info(border)
 
-        # Pre-load Whisper model + wake word detector before accepting connections
+        # Pre-load FunASR + wake word detector before accepting connections
         # so that the first start() command from the client is near-instant.
         self.logger.info("Pre-loading models (this may take a moment on first run)…")
         try:

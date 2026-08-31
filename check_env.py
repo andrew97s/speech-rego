@@ -10,7 +10,6 @@ status values: "ok" | "warn" | "error" | "info"
 """
 
 import json
-import os
 import pathlib
 import struct
 import sys
@@ -42,24 +41,21 @@ def run_checks(config_path: str = "config.json") -> List[Dict]:
         except ImportError as exc:
             add(pkg, "error", str(exc))
 
-    # ── 3. Whisper backend ────────────────────────────────────────────────────
+    # ── 3. FunASR backend ─────────────────────────────────────────────────────
     try:
-        import faster_whisper as fw
-        add("faster-whisper", "ok", getattr(fw, "__version__", "已安装"))
+        import funasr as fa
+        add("funasr", "ok", getattr(fa, "__version__", "已安装"))
     except ImportError as exc:
-        add("faster-whisper", "error", str(exc))
+        add("funasr", "error", str(exc))
 
     try:
-        import ctranslate2 as ct2
-        ver = getattr(ct2, "__version__", "?")
-        if hasattr(ct2, "StorageView"):
-            add("ctranslate2", "ok", ver)
-        else:
-            add("ctranslate2", "warn",
-                f"{ver} — C 扩展加载失败（DLL 缺失？），"
-                "运行 pip install --force-reinstall ctranslate2>=4.0.0")
+        import torch
+        detail = getattr(torch, "__version__", "?")
+        if torch.cuda.is_available():
+            detail += f"  CUDA: {torch.cuda.get_device_name(0)}"
+        add("torch", "ok", detail)
     except ImportError as exc:
-        add("ctranslate2", "error", str(exc))
+        add("torch", "error", str(exc))
 
     # ── 4. Optional backends ──────────────────────────────────────────────────
     try:
@@ -75,21 +71,10 @@ def run_checks(config_path: str = "config.json") -> List[Dict]:
         add("sentencepiece", "error", "未安装（Sherpa 唤醒词 keywords 生成不可用）")
 
     try:
-        import silero_vad  # noqa: F401
-        add("silero-vad", "ok", "已安装")
+        import torchaudio  # noqa: F401
+        add("torchaudio", "ok", "已安装")
     except ImportError:
-        add("silero-vad", "error", "未安装（录音判停不可用）")
-
-    try:
-        import onnxruntime as ort
-        providers = ort.get_available_providers()
-        gpu = [p for p in providers if "CPU" not in p]
-        detail = ort.__version__
-        if gpu:
-            detail += f"  GPU: {', '.join(gpu)}"
-        add("onnxruntime", "ok", detail)
-    except ImportError as exc:
-        add("onnxruntime", "warn", str(exc))
+        add("torchaudio", "error", "未安装（FunASR 音频前端可能不可用）")
 
     # ── 5. Microphone ─────────────────────────────────────────────────────────
     try:
@@ -119,15 +104,24 @@ def run_checks(config_path: str = "config.json") -> List[Dict]:
 
     # ── 7. Model files ────────────────────────────────────────────────────────
     cfg_path = pathlib.Path(config_path)
-    whisper_model = "base"   # fallback
-
     if not cfg_path.exists():
         add("配置文件", "error", f"未找到 {config_path}")
     else:
         try:
             cfg = json.loads(cfg_path.read_text(encoding="utf-8-sig"))
 
-            whisper_model = cfg.get("whisper", {}).get("model", "base")
+            fcfg = cfg.get("funasr") or {}
+            asr_name = fcfg.get("asr_model", "paraformer-zh-streaming")
+            vad_name = fcfg.get("vad_model", "fsmn-vad")
+            cache_dir = pathlib.Path(fcfg.get("cache_dir") or "models/funasr")
+            if not cache_dir.is_absolute():
+                cache_dir = cfg_path.parent / cache_dir
+            if cache_dir.exists() and any(cache_dir.rglob("*")):
+                add("FunASR 模型缓存", "ok", f"{cache_dir}（asr={asr_name} vad={vad_name}）")
+            else:
+                add("FunASR 模型缓存", "info",
+                    f"未缓存 — 首次启动会从 ModelScope 下载 {asr_name} / {vad_name}")
+
             ww = cfg.get("wake_word", {})
             sk = ww.get("sherpa_kws") or {}
             model_dir_name = sk.get(
@@ -145,32 +139,6 @@ def run_checks(config_path: str = "config.json") -> List[Dict]:
                 add("Sherpa KWS 模型", "warn",
                     f"未找到 {tokens} — 唤醒词不可用，请下载模型或运行 build_offline.bat")
 
-            hf_home = pathlib.Path(
-                os.environ.get("HF_HOME",
-                    pathlib.Path.home() / ".cache" / "huggingface")
-            )
-            hub_dir   = hf_home / "hub"
-            model_key = f"models--Systran--faster-whisper-{whisper_model}"
-            model_dir = hub_dir / model_key
-
-            if model_dir.exists():
-                snaps = list((model_dir / "snapshots").iterdir()) \
-                        if (model_dir / "snapshots").exists() else []
-                if snaps:
-                    size_mb = sum(
-                        f.stat().st_size
-                        for snap in snaps
-                        for f in pathlib.Path(snap).rglob("*") if f.is_file()
-                    ) / 1e6
-                    add(f"Whisper 模型（{whisper_model}）", "ok",
-                        f"已缓存，{size_mb:.0f} MB")
-                else:
-                    add(f"Whisper 模型（{whisper_model}）", "warn",
-                        "目录存在但没有快照，可能下载不完整")
-            else:
-                add(f"Whisper 模型（{whisper_model}）", "info",
-                    "未缓存 — 首次启动服务时会自动下载")
-
         except Exception as exc:
             add("配置文件", "error", f"读取失败：{exc}")
 
@@ -181,7 +149,7 @@ def run_checks(config_path: str = "config.json") -> List[Dict]:
 
 
 def _gpu_check(add):
-    """Detect GPU hardware and test CUDA / DirectML availability for Whisper."""
+    """Detect GPU hardware and test CUDA availability for FunASR/torch."""
 
     # ── Hardware info (Windows WMI) ────────────────────────────────────────
     gpu_names: list = []
@@ -221,7 +189,7 @@ def _gpu_check(add):
             drv_int = parts[2] * 10000 + parts[3] if len(parts) >= 4 else 0
             if drv_int >= 155154:   # ≈ 527.41 WDDM
                 add("NVIDIA 驱动", "ok",
-                    f"{nvidia_driver_ver} — 支持 CUDA 12 (Whisper CUDA 模式可用)")
+                    f"{nvidia_driver_ver} — 支持 CUDA 12 (FunASR CUDA 模式可用)")
             elif drv_int >= 151694:  # ≈ 516.94 WDDM
                 add("NVIDIA 驱动", "warn",
                     f"{nvidia_driver_ver} — 仅支持 CUDA 11，建议升级驱动至 527+")
@@ -231,37 +199,18 @@ def _gpu_check(add):
         except Exception:
             add("NVIDIA 驱动", "info", nvidia_driver_ver)
 
-    # ── CUDA via ctranslate2 ───────────────────────────────────────────────
     try:
-        import ctranslate2 as ct2
-        if hasattr(ct2, "get_cuda_device_count"):
-            n = ct2.get_cuda_device_count()
-            if n > 0:
-                add("CUDA 加速", "ok",
-                    f"{n} 个设备可用 — config.json 设 whisper.device=cuda / compute_type=float16")
-            else:
-                add("CUDA 加速", "info",
-                    "不可用（无 CUDA 设备或驱动不支持 CUDA 12）")
+        import torch
+        if torch.cuda.is_available():
+            n = torch.cuda.device_count()
+            name = torch.cuda.get_device_name(0) if n else ""
+            add("CUDA 加速", "ok",
+                f"{n} 个设备可用（{name}）— config.json 设 funasr.device=cuda")
         else:
-            add("CUDA 加速", "info", "ctranslate2 未能检测 CUDA 设备数")
+            add("CUDA 加速", "info",
+                "不可用（将使用 CPU；可安装 CUDA 版 PyTorch）")
     except Exception as exc:
         add("CUDA 加速", "warn", f"检测失败：{exc}")
-
-    # ── DirectML via onnxruntime ───────────────────────────────────────────
-    try:
-        import onnxruntime as ort
-        providers = ort.get_available_providers()
-        if "DmlExecutionProvider" in providers:
-            add("DirectML 加速", "ok",
-                "可用 — Sherpa KWS 等 ONNX 模型将自动使用 GPU")
-        else:
-            if any("GPU" in p or "Dml" in p or "CUDA" in p for p in providers):
-                add("DirectML 加速", "ok", f"GPU provider: {providers}")
-            else:
-                add("DirectML 加速", "info",
-                    "不可用（onnxruntime-directml 未安装，或 DirectX 12 不支持）")
-    except Exception:
-        pass
 
 
 # ── Standalone CLI ─────────────────────────────────────────────────────────────

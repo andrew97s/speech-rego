@@ -12,8 +12,8 @@ WebSocket 客户端
     ↕ SpeechServer (server.py)
     ↕ SpeechEngine (engine.py)
     ├─ 唤醒: Sherpa KWS + WakeUtteranceGate
-    ├─ 判停: speech_vad.SileroVADSession
-    └─ ASR: faster-whisper + text_postprocess
+    ├─ 判停: speech_vad.FunASRVADSession（fsmn-vad）
+    └─ ASR: funasr_asr 中文流式 + text_postprocess
 
 **VAD 说明与调参**：见 [VAD.md](VAD.md)
 ```
@@ -31,8 +31,8 @@ WebSocket 客户端
 
 ## wake_gating.py — `WakeUtteranceGate`
 
-过滤「背景连续说话里误匹配关键词」的门控。默认用 RMS，可选 Silero（`gate_use_silero`）。  
-详见 [VAD.md §②](VAD.md#-唤醒门控wakeutterancegate默认不用-silero)。
+过滤「背景连续说话里误匹配关键词」的门控。默认用 RMS，可选 FunASR VAD（`gate_use_silero`）。  
+详见 [VAD.md §②](VAD.md)。
 
 | 方法 | 说明 |
 |------|------|
@@ -88,20 +88,31 @@ WebSocket 客户端
 
 ---
 
-## speech_vad.py — Silero VAD（ASR 判停）
+## speech_vad.py — FunASR fsmn-vad（ASR 判停）
 
-> 完整流程、配置与调参：[VAD.md §①](VAD.md#-asr-判停主路径必装-silero-vad)
+> 完整流程、配置与调参：[VAD.md §①](VAD.md)
 
 | 符号 | 说明 |
 |------|------|
-| `SileroVADSession` | 流式 Silero ONNX，512 样本/窗 @16kHz |
-| `SileroVADSession.reset()` | 重置 RNN 状态（每次 listen 开始/结束） |
-| `SileroVADSession.speech_fraction(pcm16_mono)` | 块内语音窗占比 0~1 |
-| `create_silero_vad(threshold, sample_rate)` | 工厂；失败返回 None |
+| `FunASRVADSession` | 流式 fsmn-vad，默认 200ms 窗 @16kHz |
+| `FunASRVADSession.reset()` | 重置 cache（每次 listen 开始/结束） |
+| `FunASRVADSession.speech_fraction(pcm16_mono)` | 喂入 PCM，返回 0 或 1 |
+| `FunASRVADSession.consume_speech_end()` | 上一窗是否检测到语音终点 |
+| `create_funasr_vad(vad_model, sample_rate, chunk_ms)` | 工厂；失败返回 None |
 | `chunk_is_speech(...)` | 占比 ≥ min_fraction 则为 speech |
-| `trim_trailing_silence_chunks(buf, vad, ...)` | Whisper 推理前裁尾静音 |
-| `silero_threshold_from_config(w)` | 读 `whisper.silero_threshold` |
-| `silero_speech_fraction_from_config(w)` | 读 `whisper.silero_speech_fraction` |
+| `trim_trailing_silence_chunks(...)` | 流式 VAD 下直接跳过（已等过尾静音） |
+
+---
+
+## funasr_asr.py — FunASR 中文流式 ASR
+
+| 符号 | 说明 |
+|------|------|
+| `load_funasr_runtime(config)` | 加载 paraformer-zh-streaming + fsmn-vad（可选 ct-punc） |
+| `FunASRRuntime.start_utterance()` | 新建一句的流式 session |
+| `FunASRUtteranceSession.feed(pcm, is_final=False)` | 按 600ms 块 `generate`，累计文本 |
+| `FunASRUtteranceSession.finish()` | `is_final=True` 冲刷尾字 |
+| `FunASRRuntime.punctuate(text)` | 可选标点恢复 |
 
 ---
 
@@ -120,7 +131,7 @@ WebSocket 客户端
 
 ## engine.py — `SpeechEngine`
 
-Sherpa KWS 唤醒 + Silero 判停 + faster-whisper ASR；模型缓存在 stop/start 间保留。
+Sherpa KWS 唤醒 + FunASR fsmn-vad 判停 + paraformer-zh-streaming；模型缓存在 stop/start 间保留。
 
 ### 公开方法
 
@@ -130,18 +141,16 @@ Sherpa KWS 唤醒 + Silero 判停 + faster-whisper ASR；模型缓存在 stop/st
 | `trigger_listen()` | 清除 `pause_until_listen`、resume 检测器、开始 LISTENING |
 | `cancel_listen()` | 取消录音 |
 | `suppress_input(duration_ms)` | TTS 回声屏蔽 |
-| `update_config(key, value)` | 支持 `wake_word.*`、`whisper.*`；改模型参数会 invalidate 缓存 |
-| `preload()` | 预加载 Whisper + 唤醒检测器（server 启动时调用） |
+| `update_config(key, value)` | 支持 `wake_word.*`、`funasr.*`、`whisper.*` 听句时长；改模型参数会 invalidate 缓存 |
+| `preload()` | 预加载 FunASR + 唤醒检测器（server 启动时调用） |
 
 ### 内部要点
 
 | 方法 | 说明 |
 |------|------|
-| `_ensure_models_loaded_unlocked()` | 加载 faster-whisper、构建 wake detector |
-| `_run()` | 主音频循环；IDLE 唤醒 + LISTENING Silero 判停 |
-| `_do_transcribe(model, buf, language)` | Whisper 推理 + 幻听/续写过滤 |
-| `_finalize(...)` | 静音/超时结束；发 `transcript` |
-| `_transcribe_options()` | 从 config 组装 Whisper kwargs |
+| `_ensure_models_loaded_unlocked()` | 加载 FunASR ASR/VAD、构建 wake detector |
+| `_run()` | 主音频循环；IDLE 唤醒 + LISTENING 流式 ASR / fsmn-vad 判停 |
+| `_finalize(...)` | 静音/超时结束；冲刷流式 ASR，发 `transcript` |
 | `_postprocess_text(text)` | 调用 text_postprocess |
 
 ### 唤醒相关配置
@@ -189,11 +198,11 @@ WebSocket 服务（默认端口 8765）。
 | `listening_start` | trigger |
 | `listening_end` | reason: silence / timeout / cancelled |
 | `transcript` | text, is_final |
-| `partial` | text（Whisper 可选） |
+| `partial` | text（流式 ASR 增量） |
 | `error` | code, message |
 
 ---
 
 ## server.py — `SpeechServer`（Vosk）
 
-与 Whisper 版类似，使用 `engine.py`，默认端口 8765。
+与 FunASR 流式版共用 `engine.py`，默认端口 8765。

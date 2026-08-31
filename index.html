@@ -420,7 +420,7 @@
       <div class="card-title">运行时配置</div>
 
       <div id="modeHint" class="config-hint hint-sherpa-kws">
-        Sherpa KWS 唤醒 + Silero VAD 判停 + faster-whisper 识别
+        Sherpa KWS 唤醒 + FunASR VAD 判停 + FunASR 中文流式识别
       </div>
 
       <div class="config-row">
@@ -456,48 +456,32 @@
 
     </div><!-- /config card -->
 
-    <!-- Whisper config -->
+    <!-- FunASR config -->
     <div class="card">
-      <div class="card-title">Whisper 参数</div>
+      <div class="card-title">FunASR 参数（中文流式）</div>
 
       <div class="config-row">
-        <label>模型</label>
-        <select id="wModel" onchange="applyWhisperCfg('whisper.model', this.value)">
-          <option value="tiny">tiny（最快）</option>
-          <option value="base">base</option>
-          <option value="small" selected>small（推荐）</option>
-          <option value="medium">medium</option>
-          <option value="large-v3">large-v3（最准）</option>
+        <label>ASR 模型</label>
+        <select id="wModel" onchange="applyWhisperCfg('funasr.asr_model', this.value)">
+          <option value="paraformer-zh-streaming" selected>paraformer-zh-streaming（推荐）</option>
         </select>
       </div>
       <div class="config-hint" style="border-color:var(--border)">
-        更换模型需重启引擎才生效
+        流式 Paraformer，约 600ms 一帧出字。更换模型需重启引擎。首次运行从 ModelScope 下载到 <code>models/funasr</code>。
       </div>
 
       <div class="config-row">
-        <label>语言</label>
-        <select id="wLang" onchange="applyWhisperCfg('whisper.language', this.value || null)">
-          <option value="zh" selected>zh（中文）</option>
-          <option value="en">en（英文）</option>
-          <option value="">null（自动检测）</option>
+        <label>VAD 模型</label>
+        <select id="wVad" onchange="applyWhisperCfg('funasr.vad_model', this.value)">
+          <option value="fsmn-vad" selected>fsmn-vad</option>
         </select>
       </div>
 
       <div class="config-row">
         <label>推理设备</label>
-        <select id="wDevice" onchange="applyWhisperCfg('whisper.device', this.value)">
+        <select id="wDevice" onchange="applyWhisperCfg('funasr.device', this.value)">
           <option value="cuda" selected>cuda（NVIDIA GPU）</option>
-          <option value="dml">dml（DirectML）</option>
           <option value="cpu">cpu</option>
-        </select>
-      </div>
-
-      <div class="config-row">
-        <label>精度</label>
-        <select id="wCompute" onchange="applyWhisperCfg('whisper.compute_type', this.value)">
-          <option value="float16" selected>float16（GPU 推荐）</option>
-          <option value="int8">int8（CPU 推荐）</option>
-          <option value="float32">float32</option>
         </select>
       </div>
 
@@ -533,31 +517,20 @@
         <strong>唤醒后静默</strong>：命中唤醒词后暂不录入麦克风（避免外放 TTS「我在」进识别）；外放音响建议 3000～4000 ms。<br>
         静音超时 / 最短录音 / 单段最长 对应 <code style="color:var(--primary)">whisper.max_silence_ms</code>、
         <code style="color:var(--primary)">min_listen_ms</code>、<code style="color:var(--primary)">max_listen_ms</code>；
-        点「应用」后立即生效，<strong>无需重启</strong>或断开 WebSocket。
+        点「应用」后立即生效，<strong>无需重启</strong>或断开 WebSocket。判停由 FunASR <code>fsmn-vad</code> 完成。
       </div>
 
       <div class="config-row">
         <label>实时预览</label>
-        <input type="number" id="cfgPartial" value="2000" min="0" max="5000" step="500">
-        <span style="font-size:.75rem;color:var(--muted)">ms（0=关）</span>
+        <input type="number" id="cfgPartial" value="0" min="0" max="5000" step="500">
+        <span style="font-size:.75rem;color:var(--muted)">ms（0=流式即出）</span>
         <button type="button" class="btn btn-ghost btn-sm" onclick="applyPartialMs()">应用</button>
       </div>
-
-      <div class="config-row" style="align-items:flex-start">
-        <label style="padding-top:4px">提示词</label>
-        <textarea id="cfgPrompt" rows="2"
-          style="flex:1;min-width:0;background:var(--bg);border:1px solid var(--border);
-                 border-radius:5px;padding:5px 8px;color:var(--text);font-size:.78rem;
-                 resize:vertical;outline:none;"
-          placeholder="短句场景说明；勿堆一长串关键词"></textarea>
-        <button type="button" class="btn btn-ghost btn-sm" style="align-self:flex-start;margin-left:4px"
-                onclick="applyPrompt()">应用</button>
-      </div>
       <div class="config-hint" style="border-color:var(--border)">
-        推荐 <code style="color:var(--primary)">verbatim=true</code> 或一句场景说明。关键词列表会导致静音时复读「处置类型」「区域」等幻听。
+        流式 ASR 约每 600ms 追加 partial。此处为最小推送间隔，0 表示有新字就推。
       </div>
 
-    </div><!-- /whisper card -->
+    </div><!-- /funasr card -->
 
     <!-- Postprocess config -->
     <div class="card">
@@ -908,15 +881,9 @@
 
   function applyWhisperCfg(key, value) {
     send({ cmd: 'config', key, value });
-    if (key === 'whisper.model' || key === 'whisper.device' || key === 'whisper.compute_type') {
+    if (key === 'funasr.asr_model' || key === 'funasr.device' || key === 'funasr.vad_model') {
       logEvent('system', key + ' = ' + value + '（需重启引擎生效）');
     }
-  }
-
-  function applyPrompt() {
-    const v = document.getElementById('cfgPrompt').value.trim();
-    send({ cmd: 'config', key: 'whisper.initial_prompt', value: v || null });
-    logEvent('system', '提示词已更新' + (v ? ': ' + v : '（已清除）'));
   }
 
   // ── Event handler ─────────────────────────────────────────────────────────────

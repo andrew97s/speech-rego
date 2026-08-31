@@ -8,7 +8,6 @@ Usage:
 """
 
 import json
-import os
 import pathlib
 import platform
 import struct
@@ -85,27 +84,25 @@ def check_import(name, min_version=None):
 check_import("websockets", "12.0")
 check_import("sounddevice", "0.4.6")
 check_import("numpy", "1.24.0")
-check_import("faster_whisper", "1.0.0")
-check_import("ctranslate2", "4.0.0")
+check_import("funasr")
+check_import("torch")
+check_import("torchaudio")
 check_import("sherpa_onnx")
 check_import("sentencepiece")
-check_import("silero_vad")
 
-# ── 3. onnxruntime / GPU providers ───────────────────────────────────────────
-print(f"\n{BOLD}[3] onnxruntime / GPU acceleration{RESET}")
+# ── 3. GPU (torch CUDA) ──────────────────────────────────────────────────────
+print(f"\n{BOLD}[3] GPU / CUDA (FunASR){RESET}")
 
 try:
-    import onnxruntime as ort
-    providers = ort.get_available_providers()
-    gpu = [p for p in providers if p != "CPUExecutionProvider"]
-    ok(f"onnxruntime {ort.__version__}")
-    if gpu:
-        ok(f"GPU providers available: {', '.join(gpu)}")
+    import torch
+    ok(f"torch {torch.__version__}")
+    if torch.cuda.is_available():
+        ok(f"CUDA available: {torch.cuda.get_device_name(0)}")
     else:
-        info("No GPU providers — CPU only (this is fine for most use cases)")
-except ImportError as e:
-    fail(f"onnxruntime not found: {e}")
-    errors.append("missing onnxruntime")
+        info("CUDA not available — FunASR will use CPU (set funasr.device=cpu)")
+except Exception as e:
+    fail(f"torch CUDA check failed: {e}")
+    errors.append("torch/cuda")
 
 # ── 4. Audio device check ─────────────────────────────────────────────────────
 print(f"\n{BOLD}[4] Audio devices (microphones){RESET}")
@@ -140,16 +137,16 @@ if not cfg_path.exists():
 else:
     try:
         cfg = json.loads(cfg_path.read_text(encoding="utf-8-sig"))
-        whisper_model = cfg.get("whisper", {}).get("model", "base")
-        ok(f"Whisper model configured: {whisper_model}")
-        hf_home = pathlib.Path(
-            os.environ.get("HF_HOME", pathlib.Path.home() / ".cache" / "huggingface")
-        )
-        model_dir = hf_home / "hub" / f"models--Systran--faster-whisper-{whisper_model}"
-        if model_dir.exists():
-            ok(f"Whisper cache found under {model_dir.parent.name}/…")
+        fcfg = cfg.get("funasr") or {}
+        asr_name = fcfg.get("asr_model", "paraformer-zh-streaming")
+        vad_name = fcfg.get("vad_model", "fsmn-vad")
+        ok(f"FunASR ASR: {asr_name}")
+        ok(f"FunASR VAD: {vad_name}")
+        cache_dir = pathlib.Path(fcfg.get("cache_dir") or "models/funasr")
+        if cache_dir.exists() and any(cache_dir.rglob("*")):
+            ok(f"Model cache present: {cache_dir}")
         else:
-            info("Whisper weights not cached yet — first start() may download them.")
+            info("FunASR weights not cached yet — first start() may download from ModelScope.")
     except Exception as e:
         fail(f"Error reading config.json: {e}")
         errors.append("config read error")
