@@ -179,23 +179,17 @@ def funasr_cfg(config: dict) -> dict:
 
 
 def hotword_list_from_config(config: dict) -> List[str]:
-    """Fun-ASR-Nano 的 hotwords 是字符串列表。"""
+    """只读 funasr.hotword。domain_keywords 是后处理纠错词，不传给 FunASR。"""
     f = funasr_cfg(config)
     explicit = f.get("hotword")
     parts: List[str] = []
-    if explicit and str(explicit).strip():
-        raw = str(explicit).strip()
-        if "," in raw:
-            parts.extend(p.strip() for p in raw.split(",") if p.strip())
-        else:
-            parts.extend(p.strip() for p in raw.split() if p.strip())
+    if not explicit or not str(explicit).strip():
         return parts
-    w = config.get("whisper") or {}
-    kws = w.get("domain_keywords")
-    if isinstance(kws, list):
-        parts.extend(str(k).strip() for k in kws if k and str(k).strip())
-    elif isinstance(kws, str) and kws.strip():
-        parts.append(kws.strip())
+    raw = str(explicit).strip()
+    if "," in raw:
+        parts.extend(p.strip() for p in raw.split(",") if p.strip())
+    else:
+        parts.extend(p.strip() for p in raw.split() if p.strip())
     return parts
 
 

@@ -100,7 +100,8 @@ start.bat
 
 - `wake_word.keywords`：唤醒词
 - `whisper.max_silence_ms` / `min_listen_ms` / `max_listen_ms`：本机判停
-- `whisper.domain_keywords`：随识别请求发给服务器作 hotwords
+- `whisper.domain_keywords`：本机后处理纠错词，不会当作 FunASR hotwords
+- `funasr.hotword`：才传给 FunASR；留空则不启用热词
 - `postprocess.replacements`：Windows 侧错词替换
 
 VAD 说明：[docs/VAD.md](docs/VAD.md)

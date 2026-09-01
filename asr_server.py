@@ -253,9 +253,9 @@ def make_handler(service: AsrService, token: str):
             language = str(data.get("language") or "").strip()
             if not language:
                 language = asr_language_from_config(service.config)
-            hotwords = data.get("hotwords")
-            if not isinstance(hotwords, list):
-                hotwords = hotword_list_from_config(service.config)
+            # FunASR 热词只认 funasr.hotword；空配置时丢掉请求里的
+            # domain_keywords，避免 generate(hotwords=...) 触发 TypeError。
+            hotwords = hotword_list_from_config(service.config)
             itn = data.get("itn")
             try:
                 result = service.recognize(
