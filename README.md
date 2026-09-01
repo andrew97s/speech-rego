@@ -64,6 +64,12 @@ curl http://127.0.0.1:8767/v1/health
 
 首次启动会从 ModelScope 下载 Fun-ASR-Nano 到 `models/funasr/`（体积较大）。
 
+funasr 1.4.11 已内置 `FunASRNano` 类。不要用官方示例里的 `remote_code="./model.py"`：ModelScope 权重目录里没有这个文件，会报 `No module named 'model'`。若启动时报无法 import FunASRNano，在服务器上执行：
+
+```bash
+pip install tiktoken huggingface_hub transformers
+```
+
 ## 2. Windows 客户端
 
 ```bat

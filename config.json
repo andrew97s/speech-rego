@@ -39,7 +39,7 @@
         "cache_dir": "models/funasr",
         "disable_update": true,
         "hub": "ms",
-        "trust_remote_code": true,
+        "trust_remote_code": false,
         "language": "中文",
         "itn": true,
         "hotword": ""

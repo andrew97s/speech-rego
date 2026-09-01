@@ -245,6 +245,53 @@ class FunASRRuntime:
                     pass
 
 
+def _is_funasr_nano(asr_name: str) -> bool:
+    n = (asr_name or "").lower()
+    return "fun-asr-nano" in n or "funasr-nano" in n or "funasr_nano" in n
+
+
+def _ensure_funasr_nano_registered() -> None:
+    """
+    funasr>=1.4 已内置 FunASRNano。官方文档里的 remote_code=./model.py
+    会从进程 CWD 找文件；ModelScope 权重目录里没有这个文件，会报
+    No module named 'model'。先 import 内置类完成注册即可。
+    """
+    try:
+        from funasr.models.fun_asr_nano.model import FunASRNano  # noqa: F401
+    except Exception as exc:
+        logger.error(
+            "[FunASR] cannot import FunASRNano (%s): %s. "
+            "On the GPU server run: pip install tiktoken huggingface_hub transformers",
+            type(exc).__name__,
+            exc,
+        )
+        raise
+    logger.info("[FunASR] FunASRNano registered from funasr.models.fun_asr_nano")
+
+
+def _remote_code_kwargs(f: dict, base_dir: Path) -> dict:
+    """
+    仅当 remote_code 指向真实存在的 .py 时才打开 trust_remote_code。
+    默认不再传 ./model.py（官方示例假定在 Fun-ASR 仓库根目录运行）。
+    """
+    raw = str(f.get("remote_code") or "").strip()
+    if raw in ("model", "./model.py", "model.py"):
+        raw = ""
+    if raw:
+        path = Path(raw)
+        if not path.is_absolute():
+            path = (base_dir / path).resolve()
+        if path.is_file():
+            return {
+                "trust_remote_code": True,
+                "remote_code": str(path),
+            }
+        logger.warning("[FunASR] remote_code file not found: %s; using built-in Nano class", path)
+    if bool(f.get("trust_remote_code", False)) and raw:
+        return {"trust_remote_code": True, "remote_code": raw}
+    return {}
+
+
 def load_funasr_runtime(
     config: dict,
     base_dir: Optional[Path] = None,
@@ -262,7 +309,8 @@ def load_funasr_runtime(
         want = {"asr", "vad"}
 
     f = funasr_cfg(config)
-    cache = apply_modelscope_cache(f.get("cache_dir"), base_dir=base_dir)
+    root = Path(base_dir) if base_dir is not None else Path(__file__).resolve().parent
+    cache = apply_modelscope_cache(f.get("cache_dir"), base_dir=root)
     device = resolve_funasr_device(str(f.get("device") or "cpu"))
     ncpu = int(f.get("ncpu", 4))
     disable_update = bool(f.get("disable_update", True))
@@ -286,11 +334,7 @@ def load_funasr_runtime(
         common["hub"] = "ms"
 
     asr_kw = dict(common)
-    if bool(f.get("trust_remote_code", True)):
-        asr_kw["trust_remote_code"] = True
-        remote_code = str(f.get("remote_code") or "./model.py").strip()
-        if remote_code:
-            asr_kw["remote_code"] = remote_code
+    asr_kw.update(_remote_code_kwargs(f, root))
 
     logger.info(
         "[FunASR] loading components=%s asr=%s vad=%s punc=%s device=%s hub=%s cache=%s",
@@ -307,18 +351,9 @@ def load_funasr_runtime(
 
     asr_model = None
     if "asr" in want:
-        try:
-            asr_model = AutoModel(model=asr_name, **asr_kw)
-        except Exception as exc:
-            if "remote_code" in asr_kw:
-                asr_kw.pop("remote_code", None)
-                logger.warning(
-                    "[FunASR] load with remote_code failed (%s); retry without",
-                    type(exc).__name__,
-                )
-                asr_model = AutoModel(model=asr_name, **asr_kw)
-            else:
-                raise
+        if _is_funasr_nano(asr_name):
+            _ensure_funasr_nano_registered()
+        asr_model = AutoModel(model=asr_name, **asr_kw)
 
     vad_model = None
     if "vad" in want:

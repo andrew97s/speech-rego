@@ -67,7 +67,7 @@ _DEFAULTS: dict = {
         "cache_dir": "models/funasr",
         "disable_update": True,
         "hub": "ms",
-        "trust_remote_code": True,
+        "trust_remote_code": False,
         "language": "中文",
         "itn": True,
         "hotword": "",
