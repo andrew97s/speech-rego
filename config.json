@@ -33,7 +33,7 @@
         "asr_model": "FunAudioLLM/Fun-ASR-Nano-2512",
         "vad_model": "fsmn-vad",
         "punc_model": "",
-        "device": "cuda",
+        "device": "cpu",
         "ncpu": 4,
         "vad_chunk_ms": 200,
         "cache_dir": "models/funasr",
@@ -43,6 +43,12 @@
         "language": "中文",
         "itn": true,
         "hotword": ""
+    },
+    "asr_remote": {
+        "enabled": true,
+        "url": "http://127.0.0.1:8767/v1/recognize",
+        "timeout_sec": 60,
+        "token": ""
     },
     "whisper": {
         "language": "zh",

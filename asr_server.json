@@ -1,0 +1,44 @@
+{
+    "host": "0.0.0.0",
+    "port": 8767,
+    "token": "",
+    "log_level": "INFO",
+    "funasr": {
+        "asr_model": "FunAudioLLM/Fun-ASR-Nano-2512",
+        "punc_model": "",
+        "device": "cuda",
+        "ncpu": 4,
+        "cache_dir": "models/funasr",
+        "disable_update": true,
+        "hub": "ms",
+        "trust_remote_code": true,
+        "language": "中文",
+        "itn": true,
+        "hotword": ""
+    },
+    "whisper": {
+        "language": "zh",
+        "domain_keywords": [
+            "首页",
+            "楼栋",
+            "楼层",
+            "房间",
+            "烟感",
+            "火警",
+            "预警",
+            "故障",
+            "告警",
+            "消控",
+            "消控室",
+            "物联网",
+            "工单",
+            "巡检",
+            "维保",
+            "值守",
+            "勤务",
+            "预案",
+            "演练",
+            "警情"
+        ]
+    }
+}

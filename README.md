@@ -1,53 +1,100 @@
 # speech-rego
 
-本地语音识别 WebSocket 服务：**Sherpa KWS** 唤醒 → **FunASR fsmn-vad** 判停 → **Fun-ASR-Nano** 句级识别（说完再出结果）。
+两段式部署：
 
-## 快速启动
+1. **Windows 客户端**（`server.py`）：麦克风 + Sherpa 唤醒 + fsmn-vad 判停，对外提供 WebSocket。
+2. **GPU 识别服务**（`asr_server.py`）：只跑 Fun-ASR-Nano，接收一整句音频并返回文本。
 
-```bat
-install.bat
-start.bat
-```
-
-浏览器打开 `http://127.0.0.1:8080/index.html`（WebSocket 默认 `ws://127.0.0.1:8765`）。
-
-首次启动会从 ModelScope 下载 Fun-ASR-Nano 与 fsmn-vad 到 `models/funasr/`（需联网，Nano 体积较大，建议 CUDA）。
+客户端说完一句后再把 PCM 提交给服务器，**不实时出字**。
 
 ## 架构
 
-| 模块 | 文件 |
-|------|------|
-| WebSocket 服务 | `server.py` |
-| 音频引擎 | `engine.py` |
-| 唤醒 | `wake_detectors.py`（Sherpa-ONNX KWS） |
-| 判停 VAD | `speech_vad.py`（FunASR fsmn-vad） |
-| 句级 ASR | `funasr_asr.py`（Fun-ASR-Nano-2512） |
-| 后处理 | `text_postprocess.py` |
-| 误唤醒门控 | `wake_gating.py` |
+```
+外部程序 / 浏览器
+    ↕ WebSocket  ws://windows-host:8766
+Windows  python server.py
+    ├─ Sherpa KWS 唤醒
+    ├─ fsmn-vad 判停 + 缓冲 PCM
+    └─ POST http://gpu-server:8767/v1/recognize
+Ubuntu  python asr_server.py
+    └─ Fun-ASR-Nano generate → JSON {text}
+```
 
-VAD 用法与调参：[docs/VAD.md](docs/VAD.md)
+| 模块 | 跑在哪 | 文件 |
+|------|--------|------|
+| 对外 WebSocket | Windows | `server.py` |
+| 唤醒 / 录音 / 判停 | Windows | `engine.py` `wake_detectors.py` `speech_vad.py` |
+| 远程识别客户端 | Windows | `remote_asr.py` |
+| Fun-ASR-Nano HTTP | GPU 服务器 | `asr_server.py` |
+| 后处理（错词替换等） | Windows | `text_postprocess.py` |
 
-LISTENING 期间只缓冲麦克风 PCM，**不实时出字**。fsmn-vad 判定说完（或静音超时）后，对整段音频调用一次 `generate`，再推送 `transcript`。
+## 1. GPU 服务器（Ubuntu）
 
-## 配置要点（`config.json`）
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements-asr-server.txt
+# 按机器 CUDA 安装对应的 torch 轮子
+python asr_server.py
+```
 
-- `wake_word.keywords`：唤醒词（如 `小智`）；自动经 `sherpa-onnx-cli text2token` 生成 keywords 文件
-- `wake_word.sherpa_kws.model_dir`：Sherpa KWS 模型目录（默认 WenetSpeech 纯中文 zipformer 3.3M）
-- `funasr.asr_model`：句级 ASR，默认 `FunAudioLLM/Fun-ASR-Nano-2512`
-- `funasr.vad_model`：流式 VAD，默认 `fsmn-vad`
-- `funasr.device`：`cuda` 或 `cpu`
-- `funasr.hub`：`ms`（ModelScope，国内默认）或 `hf`（Hugging Face）
-- `funasr.language`：`中文` / `英文` / `日文`
-- `whisper.max_silence_ms`：判停静音时长（同时传给 fsmn-vad `max_end_silence_time`）
-- `postprocess.replacements`：识别结果词语替换
-- `whisper.domain_keywords`：同时作为 Fun-ASR-Nano hotwords 与后处理纠错词表
+默认监听 `0.0.0.0:8767`。配置见 `asr_server.json`（`funasr.device=cuda`）。
 
-## Sherpa KWS 模型
+防火墙放行 8767。可用 `token` 字段开启 `X-ASR-Token` 鉴权。
 
-默认模型：[sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01](https://k2-fsa.github.io/sherpa/onnx/kws/pretrained_models/index.html)（WenetSpeech L 10k 小时纯中文，`tokens_type=ppinyin`）
+探测：
 
-离线包构建时会自动下载并打包到 `models/sherpa-kws/`。
+```bash
+curl http://127.0.0.1:8767/v1/health
+```
 
-## 依赖
+识别接口：`POST /v1/recognize`
 
-见 `requirements.txt`（`sherpa-onnx` + `funasr` + `torch` + `transformers`）。
+```json
+{
+  "audio_b64": "<base64 16kHz s16le PCM>",
+  "encoding": "pcm_s16le",
+  "sample_rate": 16000,
+  "language": "中文",
+  "hotwords": ["勤务", "巡检"]
+}
+```
+
+返回：`{"ok": true, "text": "...", "duration_s": 2.1, "elapsed_s": 0.4}`
+
+首次启动会从 ModelScope 下载 Fun-ASR-Nano 到 `models/funasr/`（体积较大）。
+
+## 2. Windows 客户端
+
+```bat
+install.bat
+```
+
+编辑 `config.json`：
+
+- `asr_remote.enabled`: `true`
+- `asr_remote.url`: `http://<GPU服务器IP>:8767/v1/recognize`
+- `asr_remote.token`: 与 `asr_server.json` 的 `token` 一致（可空）
+- `funasr.device`: `cpu`（本机只跑小 VAD，不必用独显）
+
+```bat
+start.bat
+```
+
+对外 WebSocket 默认 `ws://127.0.0.1:8766`（以 `config.json` 的 `host`/`port` 为准）。  
+控制台：`http://127.0.0.1:8080/index.html`。
+
+外部程序协议与原来相同：`start` / `listen` / `cancel` 等命令，事件 `wake_word`、`transcript`。说完后会先有 `recognizing`，再收到 `transcript`。识别服务不可达时事件 `error`，`code=asr_remote_failed`。
+
+本机仍会下载 **fsmn-vad**（很小）。不要在 Windows 上再加载 Nano。
+
+把 `asr_remote.enabled` 设为 `false` 可退回本机识别（需本机 GPU 与 Nano 权重）。
+
+## 配置要点
+
+- `wake_word.keywords`：唤醒词
+- `whisper.max_silence_ms` / `min_listen_ms` / `max_listen_ms`：本机判停
+- `whisper.domain_keywords`：随识别请求发给服务器作 hotwords
+- `postprocess.replacements`：Windows 侧错词替换
+
+VAD 说明：[docs/VAD.md](docs/VAD.md)

@@ -138,10 +138,14 @@ else:
     try:
         cfg = json.loads(cfg_path.read_text(encoding="utf-8-sig"))
         fcfg = cfg.get("funasr") or {}
+        remote = cfg.get("asr_remote") or {}
         asr_name = fcfg.get("asr_model", "FunAudioLLM/Fun-ASR-Nano-2512")
         vad_name = fcfg.get("vad_model", "fsmn-vad")
-        ok(f"FunASR ASR: {asr_name}")
         ok(f"FunASR VAD: {vad_name}")
+        if remote.get("enabled", True) and str(remote.get("url") or "").strip():
+            ok(f"Remote ASR: {remote.get('url')}")
+        else:
+            ok(f"Local FunASR ASR: {asr_name}")
         cache_dir = pathlib.Path(fcfg.get("cache_dir") or "models/funasr")
         if cache_dir.exists() and any(cache_dir.rglob("*")):
             ok(f"Model cache present: {cache_dir}")

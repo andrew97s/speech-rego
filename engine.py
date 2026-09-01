@@ -1,7 +1,7 @@
 """
-语音识别引擎：Sherpa KWS 唤醒 → FunASR fsmn-vad 判停 → Fun-ASR-Nano 句级 ASR。
+语音识别引擎：Sherpa KWS 唤醒 → FunASR fsmn-vad 判停 → 远程 Fun-ASR-Nano。
 
-LISTENING 只缓冲音频；说完（VAD / 静音 / 超时）后才对整段做一次识别。
+LISTENING 只缓冲音频；说完后把整段 PCM 提交给 asr_server.py。
 VAD 说明见 docs/VAD.md（ASR 判停 + 唤醒门控）。
 """
 
@@ -17,10 +17,13 @@ import numpy as np
 
 from funasr_asr import (
     FunASRRuntime,
+    asr_language_from_config,
     funasr_cfg,
     funasr_model_key,
+    hotword_list_from_config,
     load_funasr_runtime,
 )
+from remote_asr import RemoteAsrError, remote_asr_enabled, transcribe_remote
 from speech_vad import (
     chunk_is_speech,
     create_funasr_vad,
@@ -137,7 +140,7 @@ class EngineState(Enum):
 
 class SpeechEngine:
     """
-    Fun-ASR-Nano 句级引擎：Sherpa KWS 唤醒 + fsmn-vad 判停 + 说完再识别。
+    Windows 客户端引擎：Sherpa KWS 唤醒 + fsmn-vad 判停 + 远程句级识别。
     """
 
     def __init__(self, config: dict, event_callback: Callable[[dict], None]):
@@ -174,10 +177,10 @@ class SpeechEngine:
         self._stop_event.clear()
         self._wake_paused_until_listen = False
         self._thread = threading.Thread(
-            target=self._run_safe, daemon=True, name="SpeechEngine-FunASR"
+            target=self._run_safe, daemon=True, name="SpeechEngine-Client"
         )
         self._thread.start()
-        logger.info("FunASR engine started")
+        logger.info("Speech engine started")
 
     def stop(self):
         """停止线程；FunASR/唤醒模型缓存保留在内存。"""
@@ -209,6 +212,13 @@ class SpeechEngine:
         """运行时更新 config；wake_word.* / funasr.* 等会 invalidate 缓存。"""
         try:
             parts = key.split(".")
+            if parts[0] == "asr_remote":
+                self.config.setdefault("asr_remote", {
+                    "enabled": True,
+                    "url": "",
+                    "timeout_sec": 60,
+                    "token": "",
+                })
             cfg = self.config
             for part in parts[:-1]:
                 cfg = cfg[part]
@@ -222,6 +232,7 @@ class SpeechEngine:
                 "postprocess.post_wake_grace_ms",
                 "funasr.ncpu",
                 "funasr.vad_chunk_ms",
+                "asr_remote.timeout_sec",
             )
             float_keys = (
                 "whisper.silero_threshold",
@@ -238,7 +249,7 @@ class SpeechEngine:
             logger.info(f"Config updated: {key} = {value!r}")
             if key.startswith("wake_word."):
                 self._ww_key = None
-            if key.startswith("funasr.") or key in (
+            if key.startswith("funasr.") or key.startswith("asr_remote.") or key in (
                 "whisper.domain_keywords",
                 "funasr.hotword",
             ):
@@ -272,8 +283,9 @@ class SpeechEngine:
             "state": state.value,
             "wake_word_enabled": ww.get("enabled", True),
             "keywords": ww.get("keywords", []),
-            "mode": "funasr_nano",
+            "mode": "wake_client_remote_asr",
             "asr_model": f.get("asr_model", "FunAudioLLM/Fun-ASR-Nano-2512"),
+            "asr_remote": remote_asr_enabled(self.config),
             "vad_model": f.get("vad_model", "fsmn-vad"),
             "whisper_max_silence_ms": w.get("max_silence_ms", 2500),
             "whisper_min_listen_ms": w.get("min_listen_ms", 600),
@@ -288,7 +300,7 @@ class SpeechEngine:
         try:
             self._run()
         except Exception as exc:
-            logger.error(f"Fun-ASR-Nano engine crashed: {exc}", exc_info=True)
+            logger.error(f"Speech engine crashed: {exc}", exc_info=True)
             self.emit({
                 "event": "error", "code": "engine_crash",
                 "message": str(exc), "ts": time.time(),
@@ -311,7 +323,7 @@ class SpeechEngine:
         speech_vad: Any = None,
     ):
         """
-        LISTENING 结束：对缓冲整段做一次 Fun-ASR-Nano 识别 → 后处理 → 发事件。
+        LISTENING 结束：把缓冲整段交给远程 FunASR（或本地兜底）→ 后处理 → 发事件。
         """
         eth = float(self.config.get("audio", {}).get("energy_threshold", 0.02))
         w = self._listen_cfg()
@@ -330,15 +342,40 @@ class SpeechEngine:
 
         dur_s = sum(len(c) for c in trimmed) / (_ASR_SAMPLE_RATE * 2)
         logger.info(
-            "Listening end (%s): %.2f s audio buffered for Fun-ASR-Nano",
+            "Listening end (%s): %.2f s audio buffered for ASR",
             reason,
             dur_s,
         )
 
         raw = ""
-        rt = self._asr_runtime
-        if rt is not None and trimmed:
-            raw = rt.transcribe_buffer(trimmed)
+        pcm = b"".join(trimmed)
+        if pcm:
+            if remote_asr_enabled(self.config):
+                self.emit({
+                    "event": "recognizing",
+                    "duration_s": round(dur_s, 2),
+                    "ts": time.time(),
+                })
+                try:
+                    raw = transcribe_remote(
+                        pcm,
+                        self.config,
+                        language=asr_language_from_config(self.config),
+                        hotwords=hotword_list_from_config(self.config),
+                        sample_rate=_ASR_SAMPLE_RATE,
+                    )
+                except RemoteAsrError as exc:
+                    logger.error("Remote ASR failed: %s", exc)
+                    self.emit({
+                        "event": "error",
+                        "code": "asr_remote_failed",
+                        "message": str(exc),
+                        "ts": time.time(),
+                    })
+            else:
+                rt = self._asr_runtime
+                if rt is not None:
+                    raw = rt.transcribe_pcm(pcm)
 
         text = self._postprocess_text(raw)
         if raw and not text:
@@ -377,7 +414,7 @@ class SpeechEngine:
     # ── Model management ─────────────────────────────────────────────────────
 
     def preload(self):
-        """预加载 FunASR 与唤醒检测器（server 启动时在后台线程调用）。"""
+        """预加载 VAD / 唤醒检测器（以及未启用远程时的本地 ASR）。"""
         self._ensure_models_loaded()
 
     def _ensure_models_loaded(self):
@@ -386,20 +423,25 @@ class SpeechEngine:
 
     def _ensure_models_loaded_unlocked(self):
         cfg_ww = self.config["wake_word"]
-        model_key = funasr_model_key(self.config)
+        remote = remote_asr_enabled(self.config)
+        components = ("vad",) if remote else ("asr", "vad")
+        model_key = funasr_model_key(self.config, components=components)
         if self._asr_runtime is not None and self._model_key == model_key:
-            logger.info("[preload] FunASR models already loaded — skipping.")
+            logger.info("[preload] models already loaded — skipping.")
         else:
             f = funasr_cfg(self.config)
             logger.info(
-                "[preload] Loading FunASR asr=%s vad=%s device=%s …",
-                f.get("asr_model", "FunAudioLLM/Fun-ASR-Nano-2512"),
+                "[preload] Loading FunASR components=%s vad=%s device=%s remote=%s …",
+                ",".join(components),
                 f.get("vad_model", "fsmn-vad"),
                 f.get("device", "cpu"),
+                remote,
             )
             try:
                 runtime = load_funasr_runtime(
-                    self.config, base_dir=Path(__file__).resolve().parent
+                    self.config,
+                    base_dir=Path(__file__).resolve().parent,
+                    components=components,
                 )
             except Exception as exc:
                 self.emit({
@@ -412,7 +454,7 @@ class SpeechEngine:
             self._asr_runtime = runtime
             self._model_key = model_key
             logger.info(
-                "[preload] FunASR ready — asr=%s vad=%s device=%s",
+                "[preload] ready — asr=%s vad=%s device=%s",
                 runtime.asr_name,
                 runtime.vad_name,
                 runtime.device,
@@ -557,7 +599,7 @@ class SpeechEngine:
             try:
                 with stream:
                     logger.info(
-                        "Microphone open.  Fun-ASR-Nano engine running.  "
+                        "Microphone open.  Wake/VAD client running.  "
                         f"stream={input_channels}ch->{stereo_mode if input_channels > 1 else 'mono'} "
                         f"@ {sample_rate} Hz"
                     )

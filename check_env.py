@@ -113,13 +113,27 @@ def run_checks(config_path: str = "config.json") -> List[Dict]:
             fcfg = cfg.get("funasr") or {}
             asr_name = fcfg.get("asr_model", "FunAudioLLM/Fun-ASR-Nano-2512")
             vad_name = fcfg.get("vad_model", "fsmn-vad")
+            remote = cfg.get("asr_remote") or {}
+            remote_on = bool(remote.get("enabled", True)) and bool(str(remote.get("url") or "").strip())
+            if remote_on:
+                try:
+                    from remote_asr import check_remote_asr
+                    ok, detail = check_remote_asr(cfg)
+                    add("远程 ASR 服务", "ok" if ok else "error", detail)
+                except Exception as exc:
+                    add("远程 ASR 服务", "error", str(exc))
             cache_dir = pathlib.Path(fcfg.get("cache_dir") or "models/funasr")
             if not cache_dir.is_absolute():
                 cache_dir = cfg_path.parent / cache_dir
             if cache_dir.exists() and any(cache_dir.rglob("*")):
-                add("FunASR 模型缓存", "ok", f"{cache_dir}（asr={asr_name} vad={vad_name}）")
+                add("FunASR 模型缓存", "ok",
+                    f"{cache_dir}（本机 VAD={vad_name}"
+                    + (f"；识别走远程 {remote.get('url')}" if remote_on else f"；asr={asr_name}")
+                    + "）")
             else:
                 add("FunASR 模型缓存", "info",
+                    "未缓存 — 客户端首次启动会下载 fsmn-vad；Nano 在 GPU 识别服务上加载"
+                    if remote_on else
                     f"未缓存 — 首次启动会从 ModelScope 下载 {asr_name} / {vad_name}")
 
             ww = cfg.get("wake_word", {})

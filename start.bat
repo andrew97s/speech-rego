@@ -5,7 +5,7 @@ chcp 65001 >nul
 set PYTHONIOENCODING=utf-8
 set PYTHONUTF8=1
 
-title Speech Recognition Service
+title Speech Client (wake + remote ASR)
 
 cd /d "%~dp0"
 
@@ -24,7 +24,7 @@ if not exist ".venv\Scripts\python.exe" (
 
 echo.
 echo  ================================================
-echo    Speech Recognition WebSocket Service
+echo    Windows wake client  (remote FunASR)
 echo    Press Ctrl+C to stop
 echo  ================================================
 echo.

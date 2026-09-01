@@ -13,7 +13,7 @@ WebSocket 客户端
     ↕ SpeechEngine (engine.py)
     ├─ 唤醒: Sherpa KWS + WakeUtteranceGate
     ├─ 判停: speech_vad.FunASRVADSession（fsmn-vad）
-    └─ ASR: funasr_asr Fun-ASR-Nano 句级 + text_postprocess
+    └─ ASR: remote_asr → GPU asr_server.py（Fun-ASR-Nano）+ 本机 text_postprocess
 
 **VAD 说明与调参**：见 [VAD.md](VAD.md)
 ```
@@ -108,7 +108,7 @@ WebSocket 客户端
 
 | 符号 | 说明 |
 |------|------|
-| `load_funasr_runtime(config)` | 加载 Fun-ASR-Nano-2512 + fsmn-vad（可选 ct-punc） |
+| `load_funasr_runtime(config, components=...)` | 按需加载 asr / vad；客户端只加载 vad |
 | `FunASRRuntime.transcribe_buffer(chunks)` | 对缓冲整句调用一次 `generate` |
 | `FunASRRuntime.transcribe_pcm(pcm16)` | 对整段 16 kHz PCM 识别 |
 | `FunASRRuntime.punctuate(text)` | 可选标点恢复（Nano 默认自带标点，通常关闭） |
@@ -130,7 +130,7 @@ WebSocket 客户端
 
 ## engine.py — `SpeechEngine`
 
-Sherpa KWS 唤醒 + FunASR fsmn-vad 判停 + Fun-ASR-Nano 句级识别；模型缓存在 stop/start 间保留。
+Sherpa KWS 唤醒 + FunASR fsmn-vad 判停 + 远程 Fun-ASR-Nano；VAD 缓存在 stop/start 间保留。
 
 ### 公开方法
 
@@ -149,7 +149,7 @@ Sherpa KWS 唤醒 + FunASR fsmn-vad 判停 + Fun-ASR-Nano 句级识别；模型�
 |------|------|
 | `_ensure_models_loaded_unlocked()` | 加载 FunASR ASR/VAD、构建 wake detector |
 | `_run()` | 主音频循环；IDLE 唤醒 + LISTENING 缓冲 / fsmn-vad 判停 |
-| `_finalize(...)` | 静音/超时结束；整段 Fun-ASR-Nano，发 `transcript` |
+| `_finalize(...)` | 静音/超时结束；POST 远程识别，发 `transcript` |
 | `_postprocess_text(text)` | 调用 text_postprocess |
 
 ### 唤醒相关配置
@@ -166,7 +166,7 @@ Sherpa KWS 唤醒 + FunASR fsmn-vad 判停 + Fun-ASR-Nano 句级识别；模型�
 
 ## server.py — `SpeechServer`
 
-WebSocket 服务（默认端口 8765）。
+Windows 对外 WebSocket（`config.json` 的 host/port，常见 8766）。
 
 | 方法 | 说明 |
 |------|------|
@@ -196,12 +196,21 @@ WebSocket 服务（默认端口 8765）。
 | `wake_word` | keyword, score |
 | `listening_start` | trigger |
 | `listening_end` | reason: silence / timeout / cancelled |
+| `recognizing` | duration_s（已提交远程识别） |
 | `transcript` | text, is_final |
 | `transcript_empty` | reason, duration_s |
-| `error` | code, message |
+| `error` | code, message（含 `asr_remote_failed`） |
 
 ---
 
-## server.py — `SpeechServer`（Vosk）
+## remote_asr.py — 远程识别 HTTP 客户端
 
-与 Fun-ASR-Nano 句级版共用 `engine.py`，默认端口 8765。
+| 符号 | 说明 |
+|------|------|
+| `remote_asr_enabled(config)` | `asr_remote.enabled` 且配置了 url |
+| `transcribe_remote(pcm, config, ...)` | POST `/v1/recognize`，返回文本 |
+| `check_remote_asr(config)` | GET `/v1/health` |
+
+## asr_server.py — GPU 识别 HTTP 服务
+
+不采麦克风。`GET /v1/health`，`POST /v1/recognize`。配置 `asr_server.json`。

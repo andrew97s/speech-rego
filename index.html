@@ -417,7 +417,7 @@
       <div class="card-title">运行时配置</div>
 
       <div id="modeHint" class="config-hint hint-sherpa-kws">
-        Sherpa KWS 唤醒 + FunASR VAD 判停 + Fun-ASR-Nano 说完再识别
+        Sherpa KWS 唤醒 + FunASR VAD 判停 + 远程 Fun-ASR-Nano（说完再提交识别）
       </div>
 
       <div class="config-row">
@@ -455,7 +455,7 @@
 
     <!-- FunASR config -->
     <div class="card">
-      <div class="card-title">FunASR 参数（说完再识别）</div>
+      <div class="card-title">FunASR 参数（本机 VAD + 远程识别）</div>
 
       <div class="config-row">
         <label>ASR 模型</label>
@@ -464,7 +464,7 @@
         </select>
       </div>
       <div class="config-hint" style="border-color:var(--border)">
-        Fun-ASR-Nano 在用户说完一句、VAD 判停后才对整段音频识别，不实时出字。更换模型需重启引擎。首次运行从 ModelScope 下载到 <code>models/funasr</code>（体积较大，建议 CUDA）。
+        Fun-ASR-Nano 跑在远程 GPU 服务器上。客户端说完一句后把音频 POST 到 <code>asr_remote.url</code>，不实时出字。更换识别服务地址请改 <code>config.json</code>。fsmn-vad 仍在本机判停。
       </div>
 
       <div class="config-row">
@@ -1054,6 +1054,7 @@
       case 'wake_word':       return 'wake_word: ' + msg.keyword + ' (' + (msg.score*100).toFixed(0) + '%)';
       case 'listening_start': return 'listening_start [' + msg.trigger + ']';
       case 'listening_end':   return 'listening_end [' + msg.reason + ']';
+      case 'recognizing':     return 'recognizing (' + (msg.duration_s || '?') + 's)';
       case 'transcript':      return 'transcript: "' + msg.text + '"';
       case 'transcript_empty': return 'transcript_empty (' + (msg.duration_s || '?') + 's)';
       case 'ack':             return 'ack: ' + msg.cmd;

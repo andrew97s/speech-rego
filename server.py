@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-语音识别 WebSocket 服务：Sherpa KWS + FunASR fsmn-vad + Fun-ASR-Nano 句级识别。
+语音识别 WebSocket 服务（Windows 客户端）：Sherpa KWS + fsmn-vad + 远程 FunASR。
 
 Usage:
   python server.py
@@ -19,6 +19,7 @@ import websockets
 from websockets.server import WebSocketServerProtocol
 
 from engine import EngineState, SpeechEngine
+from remote_asr import remote_asr_enabled
 from text_postprocess import get_postprocess_config
 
 # Windows: use Selector event loop for proper Ctrl+C delivery
@@ -60,7 +61,7 @@ _DEFAULTS: dict = {
         "asr_model": "FunAudioLLM/Fun-ASR-Nano-2512",
         "vad_model": "fsmn-vad",
         "punc_model": "",
-        "device": "cuda",
+        "device": "cpu",
         "ncpu": 4,
         "vad_chunk_ms": 200,
         "cache_dir": "models/funasr",
@@ -70,6 +71,12 @@ _DEFAULTS: dict = {
         "language": "中文",
         "itn": True,
         "hotword": "",
+    },
+    "asr_remote": {
+        "enabled": True,
+        "url": "http://127.0.0.1:8767/v1/recognize",
+        "timeout_sec": 60,
+        "token": "",
     },
     "whisper": {
         "language":            "zh",
@@ -138,12 +145,13 @@ def load_config(path: str = "config.json") -> dict:
         user = _read_user()
         merged = _deep_merge(_DEFAULTS, user)
         f = merged.get("funasr", {})
+        remote = merged.get("asr_remote") or {}
         log.info(
-            "Loaded %s — funasr.asr=%s vad=%s device=%s",
+            "Loaded %s — vad=%s device=%s remote=%s",
             abs_path,
-            f.get("asr_model", "FunAudioLLM/Fun-ASR-Nano-2512"),
             f.get("vad_model", "fsmn-vad"),
             f.get("device", "cpu"),
+            remote.get("url") if remote.get("enabled", True) else "(local)",
         )
         return merged
     except FileNotFoundError:
@@ -184,7 +192,7 @@ def setup_logging(level: str = "INFO"):
 
 class SpeechServer:
     """
-    Fun-ASR-Nano WebSocket 服务：连接管理、命令分发、引擎事件广播。
+    Windows 语音客户端 WebSocket 服务：唤醒、录音、把整句交给远程 FunASR。
 
     默认端口 8765。
     """
@@ -397,8 +405,10 @@ class SpeechServer:
             "state":                  self.engine.state.value,
             "wake_word_enabled":      ww.get("enabled", True),
             "keywords":               ww.get("keywords", []),
-            "mode":                   "funasr_nano",
+            "mode":                   "wake_client_remote_asr" if remote_asr_enabled(self.config) else "funasr_nano",
             "asr_model":              f.get("asr_model", "FunAudioLLM/Fun-ASR-Nano-2512"),
+            "asr_remote":             remote_asr_enabled(self.config),
+            "asr_remote_url":         str((self.config.get("asr_remote") or {}).get("url") or ""),
             "vad_model":              f.get("vad_model", "fsmn-vad"),
             "whisper_max_silence_ms": w.get("max_silence_ms", 2500),
             "whisper_min_listen_ms":  w.get("min_listen_ms", 600),
@@ -419,17 +429,20 @@ class SpeechServer:
         port     = self.config["port"]
         ww       = self.config["wake_word"]
         fcfg     = self.config.get("funasr") or {}
+        remote   = self.config.get("asr_remote") or {}
 
         border = "=" * 56
         self.logger.info(border)
-        self.logger.info("  Speech Recognition WebSocket Service")
+        self.logger.info("  Speech client WebSocket service")
         self.logger.info(f"  ws://{host}:{port}")
         self.logger.info(f"  Wake word  : {'enabled' if ww['enabled'] else 'disabled'}")
         if ww["enabled"]:
             self.logger.info(f"  Keywords   : {', '.join(ww.get('keywords', []))}")
-        self.logger.info(f"  ASR        : {fcfg.get('asr_model', 'FunAudioLLM/Fun-ASR-Nano-2512')} (utterance zh)")
-        self.logger.info(f"  VAD        : {fcfg.get('vad_model', 'fsmn-vad')}")
-        self.logger.info(f"  Device     : {fcfg.get('device', 'cpu')}")
+        if remote_asr_enabled(self.config):
+            self.logger.info(f"  ASR        : remote {remote.get('url')}")
+        else:
+            self.logger.info(f"  ASR        : local {fcfg.get('asr_model', 'FunAudioLLM/Fun-ASR-Nano-2512')}")
+        self.logger.info(f"  VAD        : {fcfg.get('vad_model', 'fsmn-vad')} ({fcfg.get('device', 'cpu')})")
         http_port = self.config.get("http_port", 8080)
         if http_port:
             self.logger.info(f"  UI         : http://127.0.0.1:{http_port}/index.html")
