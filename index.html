@@ -264,9 +264,6 @@
   }
   .entry .txt  { flex: 1; }
   .entry.final .txt { color: var(--text); font-weight: 500; }
-  .partial-live {
-    color: var(--muted); font-style: italic; min-height: 1.4em; padding: 2px 0;
-  }
   .transcript-actions {
     display: flex; justify-content: flex-end; gap: 8px;
   }
@@ -420,7 +417,7 @@
       <div class="card-title">运行时配置</div>
 
       <div id="modeHint" class="config-hint hint-sherpa-kws">
-        Sherpa KWS 唤醒 + FunASR VAD 判停 + FunASR 中文流式识别
+        Sherpa KWS 唤醒 + FunASR VAD 判停 + Fun-ASR-Nano 说完再识别
       </div>
 
       <div class="config-row">
@@ -458,16 +455,16 @@
 
     <!-- FunASR config -->
     <div class="card">
-      <div class="card-title">FunASR 参数（中文流式）</div>
+      <div class="card-title">FunASR 参数（说完再识别）</div>
 
       <div class="config-row">
         <label>ASR 模型</label>
         <select id="wModel" onchange="applyWhisperCfg('funasr.asr_model', this.value)">
-          <option value="paraformer-zh-streaming" selected>paraformer-zh-streaming（推荐）</option>
+          <option value="FunAudioLLM/Fun-ASR-Nano-2512" selected>Fun-ASR-Nano-2512（推荐）</option>
         </select>
       </div>
       <div class="config-hint" style="border-color:var(--border)">
-        流式 Paraformer，约 600ms 一帧出字。更换模型需重启引擎。首次运行从 ModelScope 下载到 <code>models/funasr</code>。
+        Fun-ASR-Nano 在用户说完一句、VAD 判停后才对整段音频识别，不实时出字。更换模型需重启引擎。首次运行从 ModelScope 下载到 <code>models/funasr</code>（体积较大，建议 CUDA）。
       </div>
 
       <div class="config-row">
@@ -517,17 +514,7 @@
         <strong>唤醒后静默</strong>：命中唤醒词后暂不录入麦克风（避免外放 TTS「我在」进识别）；外放音响建议 3000～4000 ms。<br>
         静音超时 / 最短录音 / 单段最长 对应 <code style="color:var(--primary)">whisper.max_silence_ms</code>、
         <code style="color:var(--primary)">min_listen_ms</code>、<code style="color:var(--primary)">max_listen_ms</code>；
-        点「应用」后立即生效，<strong>无需重启</strong>或断开 WebSocket。判停由 FunASR <code>fsmn-vad</code> 完成。
-      </div>
-
-      <div class="config-row">
-        <label>实时预览</label>
-        <input type="number" id="cfgPartial" value="0" min="0" max="5000" step="500">
-        <span style="font-size:.75rem;color:var(--muted)">ms（0=流式即出）</span>
-        <button type="button" class="btn btn-ghost btn-sm" onclick="applyPartialMs()">应用</button>
-      </div>
-      <div class="config-hint" style="border-color:var(--border)">
-        流式 ASR 约每 600ms 追加 partial。此处为最小推送间隔，0 表示有新字就推。
+        点「应用」后立即生效，<strong>无需重启</strong>或断开 WebSocket。判停由 FunASR <code>fsmn-vad</code> 完成；判停后才调用 Fun-ASR-Nano。
       </div>
 
     </div><!-- /funasr card -->
@@ -570,7 +557,6 @@
   <div class="card transcript-wrap">
     <div class="card-title">识别结果</div>
     <div class="transcript-box" id="transcriptBox">
-      <div class="partial-live" id="partialLive"></div>
       <div class="scroll-anchor" id="scrollAnchor"></div>
     </div>
     <div class="transcript-actions">
@@ -874,11 +860,6 @@
     send({ cmd: 'config', key: 'whisper.max_listen_ms', value: v });
   }
 
-  function applyPartialMs() {
-    const v = parseInt(document.getElementById('cfgPartial').value, 10);
-    send({ cmd: 'config', key: 'whisper.partial_interval_ms', value: v });
-  }
-
   function applyWhisperCfg(key, value) {
     send({ cmd: 'config', key, value });
     if (key === 'funasr.asr_model' || key === 'funasr.device' || key === 'funasr.vad_model') {
@@ -917,17 +898,11 @@
 
     } else if (event === 'listening_end') {
       setEngineState('idle');
-      clearPartial();
-
-    } else if (event === 'partial') {
-      showPartial(msg.text);
 
     } else if (event === 'transcript') {
-      clearPartial();
       addTranscript(msg.text);
 
     } else if (event === 'transcript_empty') {
-      clearPartial();
       logEvent('system', '未识别到有效文字（' + (msg.duration_s || '?') + 's）');
 
     } else if (event === 'config_updated') {
@@ -1032,14 +1007,6 @@
     el.classList.add('flash');
   }
 
-  function showPartial(text) {
-    document.getElementById('partialLive').textContent = text;
-  }
-
-  function clearPartial() {
-    document.getElementById('partialLive').textContent = '';
-  }
-
   function addTranscript(text) {
     transcripts.push(text);
     const box   = document.getElementById('transcriptBox');
@@ -1050,7 +1017,7 @@
     entry.innerHTML =
       '<span class="ts">' + ts + '</span>' +
       '<span class="txt">' + escHtml(text) + '</span>';
-    box.insertBefore(entry, document.getElementById('partialLive'));
+    box.insertBefore(entry, document.getElementById('scrollAnchor'));
     document.getElementById('scrollAnchor').scrollIntoView({ behavior: 'smooth' });
   }
 
@@ -1058,7 +1025,6 @@
     transcripts = [];
     document.getElementById('transcriptBox')
       .querySelectorAll('.entry').forEach(el => el.remove());
-    clearPartial();
   }
 
   function copyTranscripts() {
@@ -1088,7 +1054,6 @@
       case 'wake_word':       return 'wake_word: ' + msg.keyword + ' (' + (msg.score*100).toFixed(0) + '%)';
       case 'listening_start': return 'listening_start [' + msg.trigger + ']';
       case 'listening_end':   return 'listening_end [' + msg.reason + ']';
-      case 'partial':         return 'partial: ' + msg.text;
       case 'transcript':      return 'transcript: "' + msg.text + '"';
       case 'transcript_empty': return 'transcript_empty (' + (msg.duration_s || '?') + 's)';
       case 'ack':             return 'ack: ' + msg.cmd;

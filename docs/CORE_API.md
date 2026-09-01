@@ -13,7 +13,7 @@ WebSocket 客户端
     ↕ SpeechEngine (engine.py)
     ├─ 唤醒: Sherpa KWS + WakeUtteranceGate
     ├─ 判停: speech_vad.FunASRVADSession（fsmn-vad）
-    └─ ASR: funasr_asr 中文流式 + text_postprocess
+    └─ ASR: funasr_asr Fun-ASR-Nano 句级 + text_postprocess
 
 **VAD 说明与调参**：见 [VAD.md](VAD.md)
 ```
@@ -25,7 +25,7 @@ WebSocket 客户端
 | `stopped` | 未运行 |
 | `no_device` | 运行中但无麦克风，每 3s 重试 |
 | `idle` | 空闲，扫描唤醒词或等待 `listen` |
-| `listening` | 录音中，等待静音/超时后 ASR |
+| `listening` | 录音中，等待静音/超时后整段 ASR |
 
 ---
 
@@ -104,15 +104,14 @@ WebSocket 客户端
 
 ---
 
-## funasr_asr.py — FunASR 中文流式 ASR
+## funasr_asr.py — Fun-ASR-Nano 句级 ASR
 
 | 符号 | 说明 |
 |------|------|
-| `load_funasr_runtime(config)` | 加载 paraformer-zh-streaming + fsmn-vad（可选 ct-punc） |
-| `FunASRRuntime.start_utterance()` | 新建一句的流式 session |
-| `FunASRUtteranceSession.feed(pcm, is_final=False)` | 按 600ms 块 `generate`，累计文本 |
-| `FunASRUtteranceSession.finish()` | `is_final=True` 冲刷尾字 |
-| `FunASRRuntime.punctuate(text)` | 可选标点恢复 |
+| `load_funasr_runtime(config)` | 加载 Fun-ASR-Nano-2512 + fsmn-vad（可选 ct-punc） |
+| `FunASRRuntime.transcribe_buffer(chunks)` | 对缓冲整句调用一次 `generate` |
+| `FunASRRuntime.transcribe_pcm(pcm16)` | 对整段 16 kHz PCM 识别 |
+| `FunASRRuntime.punctuate(text)` | 可选标点恢复（Nano 默认自带标点，通常关闭） |
 
 ---
 
@@ -131,7 +130,7 @@ WebSocket 客户端
 
 ## engine.py — `SpeechEngine`
 
-Sherpa KWS 唤醒 + FunASR fsmn-vad 判停 + paraformer-zh-streaming；模型缓存在 stop/start 间保留。
+Sherpa KWS 唤醒 + FunASR fsmn-vad 判停 + Fun-ASR-Nano 句级识别；模型缓存在 stop/start 间保留。
 
 ### 公开方法
 
@@ -149,8 +148,8 @@ Sherpa KWS 唤醒 + FunASR fsmn-vad 判停 + paraformer-zh-streaming；模型缓
 | 方法 | 说明 |
 |------|------|
 | `_ensure_models_loaded_unlocked()` | 加载 FunASR ASR/VAD、构建 wake detector |
-| `_run()` | 主音频循环；IDLE 唤醒 + LISTENING 流式 ASR / fsmn-vad 判停 |
-| `_finalize(...)` | 静音/超时结束；冲刷流式 ASR，发 `transcript` |
+| `_run()` | 主音频循环；IDLE 唤醒 + LISTENING 缓冲 / fsmn-vad 判停 |
+| `_finalize(...)` | 静音/超时结束；整段 Fun-ASR-Nano，发 `transcript` |
 | `_postprocess_text(text)` | 调用 text_postprocess |
 
 ### 唤醒相关配置
@@ -198,11 +197,11 @@ WebSocket 服务（默认端口 8765）。
 | `listening_start` | trigger |
 | `listening_end` | reason: silence / timeout / cancelled |
 | `transcript` | text, is_final |
-| `partial` | text（流式 ASR 增量） |
+| `transcript_empty` | reason, duration_s |
 | `error` | code, message |
 
 ---
 
 ## server.py — `SpeechServer`（Vosk）
 
-与 FunASR 流式版共用 `engine.py`，默认端口 8765。
+与 Fun-ASR-Nano 句级版共用 `engine.py`，默认端口 8765。

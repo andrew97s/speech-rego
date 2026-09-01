@@ -138,7 +138,7 @@ else:
     try:
         cfg = json.loads(cfg_path.read_text(encoding="utf-8-sig"))
         fcfg = cfg.get("funasr") or {}
-        asr_name = fcfg.get("asr_model", "paraformer-zh-streaming")
+        asr_name = fcfg.get("asr_model", "FunAudioLLM/Fun-ASR-Nano-2512")
         vad_name = fcfg.get("vad_model", "fsmn-vad")
         ok(f"FunASR ASR: {asr_name}")
         ok(f"FunASR VAD: {vad_name}")

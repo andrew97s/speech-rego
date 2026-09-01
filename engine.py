@@ -1,6 +1,7 @@
 """
-语音识别引擎：Sherpa KWS 唤醒 → FunASR fsmn-vad 判停 → FunASR 中文流式 ASR。
+语音识别引擎：Sherpa KWS 唤醒 → FunASR fsmn-vad 判停 → Fun-ASR-Nano 句级 ASR。
 
+LISTENING 只缓冲音频；说完（VAD / 静音 / 超时）后才对整段做一次识别。
 VAD 说明见 docs/VAD.md（ASR 判停 + 唤醒门控）。
 """
 
@@ -16,7 +17,6 @@ import numpy as np
 
 from funasr_asr import (
     FunASRRuntime,
-    FunASRUtteranceSession,
     funasr_cfg,
     funasr_model_key,
     load_funasr_runtime,
@@ -137,7 +137,7 @@ class EngineState(Enum):
 
 class SpeechEngine:
     """
-    FunASR 流式 ASR 引擎：Sherpa KWS 唤醒 + fsmn-vad 判停 + paraformer-zh-streaming。
+    Fun-ASR-Nano 句级引擎：Sherpa KWS 唤醒 + fsmn-vad 判停 + 说完再识别。
     """
 
     def __init__(self, config: dict, event_callback: Callable[[dict], None]):
@@ -216,15 +216,12 @@ class SpeechEngine:
                 "whisper.max_silence_ms",
                 "whisper.min_listen_ms",
                 "whisper.max_listen_ms",
-                "whisper.partial_interval_ms",
                 "whisper.vad_cooldown_ms",
                 "whisper.vad_min_speech_ms",
                 "whisper.post_wake_grace_ms",
                 "postprocess.post_wake_grace_ms",
                 "funasr.ncpu",
                 "funasr.vad_chunk_ms",
-                "funasr.encoder_chunk_look_back",
-                "funasr.decoder_chunk_look_back",
             )
             float_keys = (
                 "whisper.silero_threshold",
@@ -275,8 +272,8 @@ class SpeechEngine:
             "state": state.value,
             "wake_word_enabled": ww.get("enabled", True),
             "keywords": ww.get("keywords", []),
-            "mode": "funasr_streaming",
-            "asr_model": f.get("asr_model", "paraformer-zh-streaming"),
+            "mode": "funasr_nano",
+            "asr_model": f.get("asr_model", "FunAudioLLM/Fun-ASR-Nano-2512"),
             "vad_model": f.get("vad_model", "fsmn-vad"),
             "whisper_max_silence_ms": w.get("max_silence_ms", 2500),
             "whisper_min_listen_ms": w.get("min_listen_ms", 600),
@@ -291,7 +288,7 @@ class SpeechEngine:
         try:
             self._run()
         except Exception as exc:
-            logger.error(f"FunASR engine crashed: {exc}", exc_info=True)
+            logger.error(f"Fun-ASR-Nano engine crashed: {exc}", exc_info=True)
             self.emit({
                 "event": "error", "code": "engine_crash",
                 "message": str(exc), "ts": time.time(),
@@ -308,14 +305,13 @@ class SpeechEngine:
 
     def _finalize(
         self,
-        asr_utt: Optional[FunASRUtteranceSession],
         buf: List[bytes],
         reason: str,
         *,
         speech_vad: Any = None,
     ):
         """
-        LISTENING 结束：冲刷流式 ASR → 可选标点 → 后处理 → 发事件。
+        LISTENING 结束：对缓冲整段做一次 Fun-ASR-Nano 识别 → 后处理 → 发事件。
         """
         eth = float(self.config.get("audio", {}).get("energy_threshold", 0.02))
         w = self._listen_cfg()
@@ -334,20 +330,15 @@ class SpeechEngine:
 
         dur_s = sum(len(c) for c in trimmed) / (_ASR_SAMPLE_RATE * 2)
         logger.info(
-            "Listening end (%s): %.2f s audio buffered for FunASR",
+            "Listening end (%s): %.2f s audio buffered for Fun-ASR-Nano",
             reason,
             dur_s,
         )
 
         raw = ""
         rt = self._asr_runtime
-        if asr_utt is not None:
-            raw = asr_utt.finish()
-        if (not raw) and rt is not None and trimmed:
-            logger.debug("FunASR streaming empty; fallback transcribe_buffer")
+        if rt is not None and trimmed:
             raw = rt.transcribe_buffer(trimmed)
-        if rt is not None:
-            raw = rt.punctuate(raw)
 
         text = self._postprocess_text(raw)
         if raw and not text:
@@ -402,7 +393,7 @@ class SpeechEngine:
             f = funasr_cfg(self.config)
             logger.info(
                 "[preload] Loading FunASR asr=%s vad=%s device=%s …",
-                f.get("asr_model", "paraformer-zh-streaming"),
+                f.get("asr_model", "FunAudioLLM/Fun-ASR-Nano-2512"),
                 f.get("vad_model", "fsmn-vad"),
                 f.get("device", "cpu"),
             )
@@ -478,7 +469,7 @@ class SpeechEngine:
         """
         主音频循环（在后台线程运行）。
 
-        打开麦克风 → IDLE 唤醒扫描 / LISTENING 流式 ASR + FunASR VAD 判停。
+        打开麦克风 → IDLE 唤醒扫描 / LISTENING 缓冲 + FunASR VAD 判停 / 说完后整段 ASR。
         """
         import sounddevice as sd
 
@@ -498,7 +489,6 @@ class SpeechEngine:
             return (
                 w.get("max_silence_ms", 2000),
                 w.get("max_listen_ms", 30000),
-                int(w.get("partial_interval_ms", 0)),
                 w.get("vad_cooldown_ms", 500),
                 w.get("min_listen_ms", 1000),
                 float(w.get("min_transcribe_sec", 1.5)),
@@ -507,7 +497,7 @@ class SpeechEngine:
             )
 
         (
-            max_silence_ms, max_listen_ms, partial_interval_ms,
+            max_silence_ms, max_listen_ms,
             vad_cooldown_ms, min_listen_ms, min_transcribe_sec,
             silero_speech_fraction, vad_chunk_ms,
         ) = _wparams()
@@ -567,7 +557,7 @@ class SpeechEngine:
             try:
                 with stream:
                     logger.info(
-                        "Microphone open.  FunASR engine running.  "
+                        "Microphone open.  Fun-ASR-Nano engine running.  "
                         f"stream={input_channels}ch->{stereo_mode if input_channels > 1 else 'mono'} "
                         f"@ {sample_rate} Hz"
                     )
@@ -582,9 +572,6 @@ class SpeechEngine:
                     _listen_noise_floor: float = energy_threshold * 0.5
                     _listen_silent_chunks: int = 0
                     _listen_clock_after_grace: bool = False
-                    _last_partial_text = ""
-                    _last_partial_ts = 0.0
-                    _asr_utt: Optional[FunASRUtteranceSession] = None
 
                     _speech_vad = create_funasr_vad(
                         runtime.vad_model if runtime is not None else None,
@@ -607,19 +594,15 @@ class SpeechEngine:
 
                     def _end_listening(reason: str) -> None:
                         nonlocal listen_buf, listen_start, silence_start
-                        nonlocal _last_partial_text, _last_partial_ts
                         nonlocal _input_grace_until, _listen_clock_after_grace
                         nonlocal _listen_silent_chunks, _listen_peak
-                        nonlocal _listen_noise_floor, _vad_cooldown_until, _asr_utt
+                        nonlocal _listen_noise_floor, _vad_cooldown_until
                         self._finalize(
-                            _asr_utt, listen_buf, reason, speech_vad=_speech_vad,
+                            listen_buf, reason, speech_vad=_speech_vad,
                         )
-                        _asr_utt = None
                         listen_buf = []
                         listen_start = None
                         silence_start = None
-                        _last_partial_text = ""
-                        _last_partial_ts = 0.0
                         _input_grace_until = 0.0
                         _listen_clock_after_grace = False
                         _listen_silent_chunks = 0
@@ -631,22 +614,16 @@ class SpeechEngine:
 
                     def _begin_listening(audio_bytes: bytes, trigger: str, level: float) -> None:
                         nonlocal listen_buf, listen_start, silence_start
-                        nonlocal _last_partial_text, _last_partial_ts
                         nonlocal _vad_cooldown_until, _input_grace_until
-                        nonlocal _listen_peak, _listen_noise_floor, _asr_utt
+                        nonlocal _listen_peak, _listen_noise_floor
                         listen_buf = [audio_bytes]
                         listen_start = time.time()
                         silence_start = None
-                        _last_partial_text = ""
-                        _last_partial_ts = 0.0
                         _vad_cooldown_until = 0.0
                         _input_grace_until = 0.0
                         _listen_peak = level
                         _listen_noise_floor = min(energy_threshold * 0.5, level)
-                        _asr_utt = runtime.start_utterance() if runtime is not None else None
                         _reset_speech_vad(_speech_vad)
-                        if _asr_utt is not None:
-                            _asr_utt.feed(audio_bytes)
                         if _speech_vad is not None:
                             chunk_is_speech(
                                 audio_bytes, _speech_vad, sample_rate, min_fraction=0.5
@@ -669,7 +646,7 @@ class SpeechEngine:
                             if (self.state == EngineState.LISTENING
                                     and listen_start is not None):
                                 (
-                                    max_silence_ms, max_listen_ms, partial_interval_ms,
+                                    max_silence_ms, max_listen_ms,
                                     vad_cooldown_ms, min_listen_ms, min_transcribe_sec,
                                     silero_speech_fraction, vad_chunk_ms,
                                 ) = _wparams()
@@ -678,7 +655,7 @@ class SpeechEngine:
                             continue
 
                         (
-                            max_silence_ms, max_listen_ms, partial_interval_ms,
+                            max_silence_ms, max_listen_ms,
                             vad_cooldown_ms, min_listen_ms, min_transcribe_sec,
                             silero_speech_fraction, vad_chunk_ms,
                         ) = _wparams()
@@ -784,12 +761,9 @@ class SpeechEngine:
                                     "event": "listening_end",
                                     "reason": "cancelled", "ts": time.time(),
                                 })
-                                _asr_utt = None
                                 listen_buf = []
                                 listen_start = None
                                 silence_start = None
-                                _last_partial_text = ""
-                                _last_partial_ts = 0.0
                                 _input_grace_until = 0.0
                                 _vad_cooldown_until = time.time() + vad_cooldown_ms / 1000
                                 _reset_speech_vad(_speech_vad)
@@ -806,8 +780,6 @@ class SpeechEngine:
                                     or _now < self._suppress_input_until):
                                 listen_buf.append(audio_bytes)
                                 _listen_peak = max(_listen_peak, level)
-                                if _asr_utt is not None:
-                                    _asr_utt.feed(audio_bytes)
                                 silence_start = None
                                 _listen_silent_chunks = 0
                                 continue
@@ -821,27 +793,6 @@ class SpeechEngine:
                             _listen_buf_sec = sum(
                                 len(c) for c in listen_buf
                             ) / (_ASR_SAMPLE_RATE * 2)
-
-                            if _asr_utt is not None:
-                                streamed = _asr_utt.feed(audio_bytes)
-                                if (
-                                    streamed
-                                    and streamed != _last_partial_text
-                                    and (
-                                        partial_interval_ms <= 0
-                                        or (_now - _last_partial_ts) * 1000
-                                        >= partial_interval_ms
-                                    )
-                                ):
-                                    _last_partial_text = streamed
-                                    _last_partial_ts = _now
-                                    text = self._postprocess_text(streamed)
-                                    if text:
-                                        self.emit({
-                                            "event": "partial",
-                                            "text": text,
-                                            "ts": time.time(),
-                                        })
 
                             still_speaking = _still_speaking_for_end(
                                 audio_bytes,

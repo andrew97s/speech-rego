@@ -111,7 +111,7 @@ def run_checks(config_path: str = "config.json") -> List[Dict]:
             cfg = json.loads(cfg_path.read_text(encoding="utf-8-sig"))
 
             fcfg = cfg.get("funasr") or {}
-            asr_name = fcfg.get("asr_model", "paraformer-zh-streaming")
+            asr_name = fcfg.get("asr_model", "FunAudioLLM/Fun-ASR-Nano-2512")
             vad_name = fcfg.get("vad_model", "fsmn-vad")
             cache_dir = pathlib.Path(fcfg.get("cache_dir") or "models/funasr")
             if not cache_dir.is_absolute():

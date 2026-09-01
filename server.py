@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-语音识别 WebSocket 服务：Sherpa KWS + FunASR fsmn-vad + FunASR 中文流式 ASR。
+语音识别 WebSocket 服务：Sherpa KWS + FunASR fsmn-vad + Fun-ASR-Nano 句级识别。
 
 Usage:
   python server.py
@@ -57,17 +57,18 @@ _DEFAULTS: dict = {
         "max_wake_utterance_ms": 1400,
     },
     "funasr": {
-        "asr_model": "paraformer-zh-streaming",
+        "asr_model": "FunAudioLLM/Fun-ASR-Nano-2512",
         "vad_model": "fsmn-vad",
-        "punc_model": "ct-punc",
+        "punc_model": "",
         "device": "cuda",
         "ncpu": 4,
-        "chunk_size": [0, 10, 5],
-        "encoder_chunk_look_back": 4,
-        "decoder_chunk_look_back": 1,
         "vad_chunk_ms": 200,
         "cache_dir": "models/funasr",
         "disable_update": True,
+        "hub": "ms",
+        "trust_remote_code": True,
+        "language": "中文",
+        "itn": True,
         "hotword": "",
     },
     "whisper": {
@@ -91,7 +92,7 @@ _DEFAULTS: dict = {
     },
     "audio": {
         "device":           None,
-        "sample_rate":      16000,   # FunASR streaming is 16 kHz
+        "sample_rate":      16000,   # Fun-ASR-Nano is 16 kHz
         "chunk_size":       4000,
         "energy_threshold": 0.02,
         "input_channels":   1,      # set 2 for stereo mics; downmixed before ASR
@@ -140,7 +141,7 @@ def load_config(path: str = "config.json") -> dict:
         log.info(
             "Loaded %s — funasr.asr=%s vad=%s device=%s",
             abs_path,
-            f.get("asr_model", "paraformer-zh-streaming"),
+            f.get("asr_model", "FunAudioLLM/Fun-ASR-Nano-2512"),
             f.get("vad_model", "fsmn-vad"),
             f.get("device", "cpu"),
         )
@@ -183,7 +184,7 @@ def setup_logging(level: str = "INFO"):
 
 class SpeechServer:
     """
-    FunASR 流式 WebSocket 服务：连接管理、命令分发、引擎事件广播。
+    Fun-ASR-Nano WebSocket 服务：连接管理、命令分发、引擎事件广播。
 
     默认端口 8765。
     """
@@ -396,8 +397,8 @@ class SpeechServer:
             "state":                  self.engine.state.value,
             "wake_word_enabled":      ww.get("enabled", True),
             "keywords":               ww.get("keywords", []),
-            "mode":                   "funasr_streaming",
-            "asr_model":              f.get("asr_model", "paraformer-zh-streaming"),
+            "mode":                   "funasr_nano",
+            "asr_model":              f.get("asr_model", "FunAudioLLM/Fun-ASR-Nano-2512"),
             "vad_model":              f.get("vad_model", "fsmn-vad"),
             "whisper_max_silence_ms": w.get("max_silence_ms", 2500),
             "whisper_min_listen_ms":  w.get("min_listen_ms", 600),
@@ -426,7 +427,7 @@ class SpeechServer:
         self.logger.info(f"  Wake word  : {'enabled' if ww['enabled'] else 'disabled'}")
         if ww["enabled"]:
             self.logger.info(f"  Keywords   : {', '.join(ww.get('keywords', []))}")
-        self.logger.info(f"  ASR        : {fcfg.get('asr_model', 'paraformer-zh-streaming')} (streaming zh)")
+        self.logger.info(f"  ASR        : {fcfg.get('asr_model', 'FunAudioLLM/Fun-ASR-Nano-2512')} (utterance zh)")
         self.logger.info(f"  VAD        : {fcfg.get('vad_model', 'fsmn-vad')}")
         self.logger.info(f"  Device     : {fcfg.get('device', 'cpu')}")
         http_port = self.config.get("http_port", 8080)

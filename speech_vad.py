@@ -8,7 +8,7 @@ LISTENING 听句结束判停用的 FunASR fsmn-vad（流式）。
 
 与以下无关（勿混淆）：
   - WakeUtteranceGate 可选 VAD（wake_word.gate_use_silero，默认 false）
-  - FunASR 流式 ASR 本身不负责切句
+  - Fun-ASR-Nano 本身不负责切句
 
 依赖：funasr。默认 200ms 分析窗（config funasr.vad_chunk_ms）。
 """
