@@ -32,21 +32,98 @@ _LANG_MAP = {
 }
 
 
+def _cuda_mem_free_bytes(index: int) -> int:
+    import torch
+
+    try:
+        free, _total = torch.cuda.mem_get_info(index)
+        return int(free)
+    except Exception:
+        props = torch.cuda.get_device_properties(index)
+        allocated = torch.cuda.memory_allocated(index)
+        return max(0, int(props.total_memory) - int(allocated))
+
+
+def _pick_cuda_device(requested: str) -> str:
+    """
+    cuda / gpu / auto → 选空闲显存最多的卡；cuda:N → 使用指定卡。
+    Nano 大约只需 2～4 GB；OOM 通常是 cuda:0 已被别的进程占满。
+    """
+    import torch
+
+    if not torch.cuda.is_available():
+        raise RuntimeError("CUDA requested but torch.cuda.is_available() is False")
+
+    n = torch.cuda.device_count()
+    stats = []
+    for i in range(n):
+        free = _cuda_mem_free_bytes(i)
+        total = int(torch.cuda.get_device_properties(i).total_memory)
+        name = torch.cuda.get_device_name(i)
+        stats.append((free, total, i, name))
+        logger.info(
+            "[FunASR] GPU %d %s: %.2f GiB free / %.2f GiB total",
+            i,
+            name,
+            free / (1024 ** 3),
+            total / (1024 ** 3),
+        )
+
+    req = (requested or "cuda").strip().lower()
+    min_free = 2 * 1024 ** 3  # 2 GiB
+    if req in ("cuda", "gpu", "auto"):
+        stats.sort(key=lambda x: x[0], reverse=True)
+        free, total, idx, name = stats[0]
+        if free < min_free:
+            busy = "; ".join(
+                f"GPU{i} {f / (1024 ** 3):.2f}GiB free"
+                for f, _t, i, _n in sorted(stats, key=lambda x: x[2])
+            )
+            raise RuntimeError(
+                f"No GPU has >= 2 GiB free ({busy}). "
+                "Check nvidia-smi and set funasr.device to a free card, e.g. cuda:1"
+            )
+        logger.info("[FunASR] auto-selected cuda:%d (%s, %.2f GiB free)", idx, name, free / (1024 ** 3))
+        return f"cuda:{idx}"
+
+    if req.startswith("cuda:"):
+        try:
+            idx = int(req.split(":", 1)[1])
+        except ValueError as exc:
+            raise RuntimeError(f"Invalid device {requested!r}") from exc
+        if idx < 0 or idx >= n:
+            raise RuntimeError(f"device {requested!r} out of range (0..{n - 1})")
+        free = stats[idx][0]
+        if free < min_free:
+            busy = "; ".join(
+                f"cuda:{i}={f / (1024 ** 3):.2f}GiB free"
+                for f, _t, i, _n in stats
+            )
+            raise RuntimeError(
+                f"{req} only has {free / (1024 ** 3):.2f} GiB free; need >= 2 GiB. "
+                f"{busy}. Set funasr.device to a free GPU (e.g. cuda:1) or stop the other process."
+            )
+        return f"cuda:{idx}"
+
+    return "cuda:0"
+
+
 def resolve_funasr_device(device: str) -> str:
-    """把 config 里的 cuda / cpu / dml 映射成 FunASR AutoModel 的 device 字符串。"""
+    """把 config 里的 cuda / cuda:1 / cpu 映射成 FunASR AutoModel 的 device 字符串。"""
     d = (device or "cpu").strip().lower()
-    if d in ("cuda", "gpu"):
-        d = "cuda:0"
-    if d.startswith("cuda"):
+    if d in ("cuda", "gpu", "auto") or d.startswith("cuda"):
         try:
             import torch
 
-            if torch.cuda.is_available():
-                return d
-        except Exception:
-            pass
-        logger.warning("[FunASR] CUDA requested but unavailable; using cpu")
-        return "cpu"
+            if not torch.cuda.is_available():
+                logger.warning("[FunASR] CUDA requested but unavailable; using cpu")
+                return "cpu"
+            return _pick_cuda_device(d)
+        except RuntimeError:
+            raise
+        except Exception as exc:
+            logger.warning("[FunASR] CUDA probe failed (%s); using cpu", exc)
+            return "cpu"
     if d in ("dml", "directml", "mps"):
         if d == "mps":
             return "mps"

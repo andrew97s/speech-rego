@@ -38,7 +38,7 @@ pip install -r requirements-asr-server.txt
 python asr_server.py
 ```
 
-默认监听 `0.0.0.0:8767`。配置见 `asr_server.json`（`funasr.device=cuda`）。
+默认监听 `0.0.0.0:8767`。配置见 `asr_server.json`（`funasr.device` 用 `auto` 选空闲显存最多的卡，或写成 `cuda:1`）。
 
 防火墙放行 8767。可用 `token` 字段开启 `X-ASR-Token` 鉴权。
 

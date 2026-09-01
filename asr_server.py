@@ -49,7 +49,7 @@ _DEFAULTS: dict = {
         "asr_model": "FunAudioLLM/Fun-ASR-Nano-2512",
         "vad_model": "fsmn-vad",
         "punc_model": "",
-        "device": "cuda",
+        "device": "auto",
         "ncpu": 4,
         "cache_dir": "models/funasr",
         "disable_update": True,

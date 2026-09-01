@@ -46,7 +46,7 @@
     },
     "asr_remote": {
         "enabled": true,
-        "url": "http://127.0.0.1:8767/v1/recognize",
+        "url": "http://192.168.1.222:8767/v1/recognize",
         "timeout_sec": 60,
         "token": ""
     },

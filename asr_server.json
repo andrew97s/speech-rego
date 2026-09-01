@@ -6,7 +6,7 @@
     "funasr": {
         "asr_model": "FunAudioLLM/Fun-ASR-Nano-2512",
         "punc_model": "",
-        "device": "cuda",
+        "device": "auto",
         "ncpu": 4,
         "cache_dir": "models/funasr",
         "disable_update": true,
