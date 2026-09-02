@@ -106,7 +106,7 @@ _DEFAULTS: dict = {
         "stereo_mode":      "mix",  # mix | left | right
     },
     "log_level": "INFO",
-    "http_port": 8080,   # 0 = disabled; serve index.html on this port
+    "http_port": 9400,   # 0 = disabled; serve index.html on this port
     # 无 WebSocket 客户端连接超过该时长(ms)后自动 engine.stop() 释放麦克风；0=关闭
     "auto_stop_without_clients_ms": 60000,
 }
@@ -443,7 +443,7 @@ class SpeechServer:
         else:
             self.logger.info(f"  ASR        : local {fcfg.get('asr_model', 'FunAudioLLM/Fun-ASR-Nano-2512')}")
         self.logger.info(f"  VAD        : {fcfg.get('vad_model', 'fsmn-vad')} ({fcfg.get('device', 'cpu')})")
-        http_port = self.config.get("http_port", 8080)
+        http_port = self.config.get("http_port", 9400)
         if http_port:
             self.logger.info(f"  UI         : http://127.0.0.1:{http_port}/index.html")
         idle_ms = self._auto_stop_ms()
@@ -522,7 +522,7 @@ def main():
     os.chdir(app_dir)
     config = load_config()
     setup_logging(config.get("log_level", "INFO"))
-    http_port = config.get("http_port", 8080)
+    http_port = config.get("http_port", 9400)
     _start_http_server(http_port, app_dir)
     server = SpeechServer(config)
     try:

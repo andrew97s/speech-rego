@@ -49,8 +49,8 @@
 param(
     [string] $OfflinePackageDir = "",
     [string] $OutputZip         = "",
-    [string] $ServiceName       = "SpeechRecoWhisper",
-    [string] $DisplayName       = "语音识别服务 (Whisper)",
+    [string] $ServiceName       = "SpeechRecoClient",
+    [string] $DisplayName       = "语音识别客户端",
     [string] $NssmZipUrl        = "https://nssm.cc/release/nssm-2.24.zip",
     [string] $NssmZipPath       = "",
     [switch] $SkipZip,
@@ -139,25 +139,22 @@ robocopy $OfflinePackageDir $StagingDir /MIR /NFL /NDL /NJH /NJS /NC /NS /NP | O
 if ($LASTEXITCODE -ge 8) { Write-Fail "robocopy 失败，退出码: $LASTEXITCODE" }
 Write-Ok "已镜像到: $StagingDir"
 
-# ── start_svc.bat (strip interactive tail from start.bat) ─────────────────────
+# ── start_svc.bat（服务备用；NSSM 实际直接启动 python.exe）────────────────
 Write-Step "[4/7] 生成 start_svc.bat"
-$batPath = Join-Path $StagingDir "start.bat"
-$lines   = Get-Content -LiteralPath $batPath -Encoding UTF8
-$outLines = foreach ($line in $lines) {
-    $t = $line.Trim()
-    if ($t -eq "pause") { continue }
-    if ($t -match '^echo\s+服务已停止') { continue }
-    # 服务在 Session 0 运行：title 无控制台易异常；echo y| 管道在无人值守下不必要
-    if ($t -match '^(?i)title\s') { continue }
-    # 含空格安装路径：必须用 "%~dp0python\python.exe" 形式；兼容旧 bat（无引号）与新 bat（已带引号）
-    if ($t -match '^(?i)echo\s+y\s+\|\s+(?:"%~dp0python\\python\.exe"\s+"%~dp0server\.py"|python\\python\.exe\s+server\.py)$') {
-        '"%~dp0python\python.exe" "%~dp0server.py"'
-        continue
-    }
-    $line
-}
 $svcBat = Join-Path $StagingDir "start_svc.bat"
-$outLines | Set-Content -LiteralPath $svcBat -Encoding UTF8
+$svcBatBody = @(
+    '@echo off'
+    'chcp 65001 >nul'
+    'setlocal'
+    'set PYTHONIOENCODING=utf-8'
+    'set PYTHONUTF8=1'
+    'set "MODELSCOPE_CACHE=%~dp0models\funasr"'
+    'set "MODELSCOPE_MODULES_CACHE=%~dp0models\funasr"'
+    'cd /d "%~dp0."'
+    '"%~dp0python\python.exe" "%~dp0server.py"'
+) -join "`r`n"
+$ascii = New-Object System.Text.ASCIIEncoding
+[System.IO.File]::WriteAllText($svcBat, $svcBatBody + "`r`n", $ascii)
 Write-Ok "已写入: start_svc.bat"
 
 Copy-Item -LiteralPath $nssmExeSrc -Destination (Join-Path $StagingDir "nssm.exe") -Force
@@ -206,7 +203,7 @@ $utf8BomEnc = New-Object System.Text.UTF8Encoding $true
 $batInstall = @(
     '@echo off'
     'chcp 65001 >nul'
-    'cd /d "%~dp0"'
+    'cd /d "%~dp0."'
     'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0LaunchInstall.ps1"'
     'if errorlevel 1 pause'
 ) -join "`r`n"

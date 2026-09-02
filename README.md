@@ -72,23 +72,38 @@ pip install tiktoken huggingface_hub transformers
 
 ## 2. Windows 客户端
 
+开发机：
+
 ```bat
 install.bat
+start.bat
 ```
 
-编辑 `config.json`：
+打成安装包（后台常驻 Windows 服务）：
+
+```bat
+build_client_installer.bat
+```
+
+产出 `dist\SpeechReco-Client-Setup.exe`。安装后：
+
+- 服务名 `SpeechRecoClient`，开机自启
+- Web 控制台 `http://127.0.0.1:9400/index.html`
+- WebSocket `ws://127.0.0.1:8766`
+
+编辑安装目录或源码里的 `config.json`：
 
 - `asr_remote.enabled`: `true`
 - `asr_remote.url`: `http://<GPU服务器IP>:8767/v1/recognize`
 - `asr_remote.token`: 与 `asr_server.json` 的 `token` 一致（可空）
 - `funasr.device`: `cpu`（本机只跑小 VAD，不必用独显）
+- `port`: `8766`（WebSocket）
+- `http_port`: `9400`（Web UI）
 
-```bat
-start.bat
-```
+构建安装包需要 [Inno Setup 6](https://jrsoftware.org/isdl.php)。已有离线目录时可：`.\build_client_installer.ps1 -SkipOffline`。
 
 对外 WebSocket 默认 `ws://127.0.0.1:8766`（以 `config.json` 的 `host`/`port` 为准）。  
-控制台：`http://127.0.0.1:8080/index.html`。
+控制台：`http://127.0.0.1:9400/index.html`。
 
 外部程序协议与原来相同：`start` / `listen` / `cancel` 等命令，事件 `wake_word`、`transcript`。说完后会先有 `recognizing`，再收到 `transcript`。识别服务不可达时事件 `error`，`code=asr_remote_failed`。
 

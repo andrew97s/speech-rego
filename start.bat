@@ -25,6 +25,8 @@ if not exist ".venv\Scripts\python.exe" (
 echo.
 echo  ================================================
 echo    Windows wake client  (remote FunASR)
+echo    WebSocket : ws://127.0.0.1:8766
+echo    Web UI    : http://127.0.0.1:9400/index.html
 echo    Press Ctrl+C to stop
 echo  ================================================
 echo.

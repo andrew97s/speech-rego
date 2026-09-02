@@ -1,65 +1,56 @@
 ﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
-    离线部署包构建脚本
+    离线部署包构建脚本（Windows 客户端：唤醒 + VAD + 远程 FunASR）
     Builds a fully self-contained portable folder — copy it to any Windows
     machine and run start.bat without any prior installation.
 
 .DESCRIPTION
     输出文件夹包含:
       python\      Python 3.11 嵌入式运行时 + 所有 pip 依赖
-      models\      Whisper 模型 HuggingFace 本地缓存 + Sherpa KWS 模型
+      models\      Sherpa KWS 唤醒模型 + FunASR fsmn-vad
       *.py         应用程序源码（server.py / engine.py 等）
-      config.json  配置文件（已自动调整路径）
+      config.json  配置文件（WebSocket 8766，Web 9400）
       start.bat / check_env.bat
 
-    技术栈: Sherpa KWS 唤醒 + Silero VAD 判停 + faster-whisper ASR
+    技术栈: Sherpa KWS 唤醒 + fsmn-vad 判停 + 远程 Fun-ASR-Nano
 
     目标机器系统要求:
       - Windows 10 Build 1809+ / Windows 11 (x64)
       - Visual C++ 2015-2022 Redistributable (x64)
         如未安装: https://aka.ms/vs/17/release/vc_redist.x64.exe
 
-.PARAMETER WhisperModel
-    Whisper 模型大小 (默认: small)
-    可选: tiny | base | small | medium | large-v3
-
 .PARAMETER GPU
-    GPU 加速模式 (默认: none)
+    GPU 加速模式 (默认: none)。客户端只跑 VAD，一般用 CPU。
     none  — 纯 CPU（兼容所有机器）
     cuda  — NVIDIA CUDA（需目标机器有 CUDA 12）
-    dml   — DirectML / DirectX 12（AMD / Intel / NVIDIA，无需 CUDA）
+    dml   — DirectML（本客户端不使用）
 
 .PARAMETER IncludeKWS
     是否安装 sherpa-onnx 并下载 Sherpa KWS 模型（默认: $true）
     别名: IncludeOWW（兼容旧参数名）
 
-.PARAMETER BundleNvidiaCuda
-    是否将 nvidia-cublas / nvidia-cudnn 等 CUDA 运行库打包进部署包（默认: $false）
-    关闭可节省约 800 MB；目标机器需自行安装 NVIDIA CUDA Toolkit 12
-    启用可完全离线使用 CUDA：-BundleNvidiaCuda $true
+.PARAMETER Force
+    输出目录已存在时直接覆盖，不询问。
 
 .PARAMETER OutputDir
     输出目录（默认: .\dist\SpeechReco-Offline）
 
 .EXAMPLE
-    .\build_offline.ps1 -WhisperModel tiny -GPU none
-        # 约最小体积：CPU + tiny 模型
-    .\build_offline.ps1 -WhisperModel small -GPU cuda -IncludeKWS $false
-        # 不打包 Sherpa KWS（无唤醒词功能）
-    .\build_offline.ps1 -PruneUnusedDeps $false
-        # 保留 pip 拉取的全部依赖（调试用）
-    .\build_offline.ps1 -WhisperModel small -GPU cuda -OutputDir D:\deploy
+    .\build_offline.ps1
+    .\build_offline.ps1 -Force -GPU none
+    .\build_offline.ps1 -OutputDir D:\deploy
 #>
 
 param(
     [string] $WhisperModel    = "small",
     [ValidateSet("none","cuda","dml","auto")]
-    [string] $GPU             = "auto",
+    [string] $GPU             = "none",
     [Alias("IncludeOWW")]
     [bool]   $IncludeKWS      = $true,
-    [bool]   $BundleNvidiaCuda = $false, # 是否打包 nvidia-* CUDA 运行库（约 800MB）；false=目标机需自行安装 CUDA Toolkit
-    [bool]   $PruneUnusedDeps  = $true,  # 构建后卸载 onnxruntime / hf_xet / HF CLI 等运行时不需要的包
+    [bool]   $BundleNvidiaCuda = $false,
+    [bool]   $PruneUnusedDeps  = $true,
+    [switch] $Force,
     [string] $OutputDir       = ""
 )
 
@@ -90,18 +81,79 @@ function Write-CmdBat {
 function Invoke-EmbeddedPip {
     param(
         [Parameter(Mandatory)][string[]]$PipArgs,
-        [switch]$Quiet
+        [switch]$Quiet,
+        [switch]$ShowOnError
     )
-    $args = @('-m', 'pip') + $PipArgs + '--no-warn-script-location'
+    $args = @('-m', 'pip') + $PipArgs + @(
+        '--no-warn-script-location',
+        '--retries', '15',
+        '--timeout', '120'
+    )
     if ($Quiet) { $args += '--quiet' }
+    $log = Join-Path $env:TEMP ("sr_pip_{0}.log" -f $PID)
     $prevEap = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
     try {
-        & $PyExe @args 2>&1 | Out-Null
-        return [int]$LASTEXITCODE
+        & $PyExe @args *> $log
+        $rc = [int]$LASTEXITCODE
+        if ($rc -ne 0 -and ($ShowOnError -or -not $Quiet)) {
+            Write-Warn "pip 退出码 $rc，末尾输出："
+            if (Test-Path -LiteralPath $log) {
+                Get-Content -LiteralPath $log -Tail 25 -ErrorAction SilentlyContinue |
+                    ForEach-Object { Write-Host "      $_" }
+            }
+        }
+        return $rc
     } finally {
         $ErrorActionPreference = $prevEap
     }
+}
+
+function Install-FunasrStack {
+    Write-Info "  pip install funasr modelscope（网络中断会自动重试）"
+    $attempts = @(
+        @{ Label = "清华镜像"; Extra = @() },
+        @{ Label = "清华镜像(清缓存重试)"; Extra = @('--no-cache-dir') },
+        @{ Label = "官方 PyPI"; Extra = @('--index-url', 'https://pypi.org/simple', '--trusted-host', 'pypi.org') }
+    )
+    foreach ($a in $attempts) {
+        Write-Info "  尝试 $($a.Label) ..."
+        $rc = Invoke-EmbeddedPip (@('install', 'funasr>=1.1.6', 'modelscope', '--prefer-binary') + $a.Extra) -ShowOnError
+        if ($rc -eq 0) { return $true }
+    }
+
+    Write-Warn "带依赖安装失败，改为 funasr --no-deps + 运行时必需包（跳过需编译的 umap 等）"
+    $rc = Invoke-EmbeddedPip @('install', 'funasr>=1.1.6', '--no-deps', '--prefer-binary') -ShowOnError
+    if ($rc -ne 0) { return $false }
+
+    $core = @(
+        'modelscope',
+        'scipy',
+        'librosa',
+        'soundfile>=0.12.1',
+        'PyYAML>=5.1.2',
+        'tqdm',
+        'requests',
+        'regex',
+        'omegaconf>=2.0',
+        'hydra-core>=1.3.2',
+        'huggingface_hub',
+        'safetensors',
+        'tiktoken',
+        'sentencepiece',
+        'kaldiio>=2.17.0',
+        'jieba',
+        'jamo',
+        'jaconv',
+        'rapidfuzz>=3.0.0',
+        'tensorboardX',
+        'oss2'
+    )
+    foreach ($pkg in $core) {
+        $rc = Invoke-EmbeddedPip @('install', $pkg, '--prefer-binary')
+        if ($rc -ne 0) { Write-Warn "  可选/依赖 $pkg 安装失败（继续）" }
+    }
+    return $true
 }
 
 # 校验下载文件存在且体积合理；过小/损坏则删除并返回 $false
@@ -286,10 +338,11 @@ Write-Host "  离线部署包构建器  /  Offline Deployment Builder" -Foregrou
 Write-Host $border -ForegroundColor Cyan
 Write-Host "  输出目录      : $OutputDir"
 Write-Host "  模型缓存      : $CacheDir"
-Write-Host "  Whisper 模型  : $WhisperModel"
+Write-Host "  客户端        : Sherpa KWS + fsmn-vad + 远程 FunASR"
+Write-Host "  WebSocket     : 8766"
+Write-Host "  Web UI        : 9400"
 Write-Host "  GPU 模式      : $GPU"
 Write-Host "  包含 KWS     : $IncludeKWS"
-Write-Host "  打包 NVIDIA   : $BundleNvidiaCuda"
 Write-Host $border -ForegroundColor Cyan
 
 # ── STEP 1: Output directory ───────────────────────────────────────────────────
@@ -304,10 +357,13 @@ $env:PIP_CACHE_DIR   = $PipCacheDir
 # 国内 PyPI 镜像，大幅提升下载速度
 $env:PIP_INDEX_URL   = "https://pypi.tuna.tsinghua.edu.cn/simple"
 $env:PIP_TRUSTED_HOST = "pypi.tuna.tsinghua.edu.cn"
+$env:PIP_DEFAULT_TIMEOUT = "180"
 
 if (Test-Path $OutputDir) {
-    $ans = Read-Host "  '$OutputDir' 已存在，是否覆盖重建? [y/N]"
-    if ($ans -notmatch "^[yY]") { Write-Host "已取消。"; exit 0 }
+    if (-not $Force) {
+        $ans = Read-Host "  '$OutputDir' 已存在，是否覆盖重建? [y/N]"
+        if ($ans -notmatch "^[yY]") { Write-Host "已取消。"; exit 0 }
+    }
     Remove-Item $OutputDir -Recurse -Force
 }
 foreach ($d in @($OutputDir, $PythonDir, $ModelsDir, $HFCacheDir)) {
@@ -372,12 +428,9 @@ $pkgs = @(
     'websockets>=12.0',
     'sounddevice>=0.4.6',
     'numpy>=1.24.0,<2.0.0',
-    'faster-whisper>=1.0.0',
-    'ctranslate2>=4.0.0',
     'zhconv>=1.4.3',
     'pypinyin>=0.49.0',
-    'silero-vad>=5.1.0,<6',
-    'onnxruntime>=1.16.0'
+    'transformers>=4.45.0'
 )
 
 foreach ($pkg in $pkgs) {
@@ -388,25 +441,37 @@ foreach ($pkg in $pkgs) {
     }
 }
 
-# Silero VAD（Whisper 录音结束判停）
-Write-Info "  verify silero-vad + onnxruntime"
-$svCheck = Join-Path $env:TEMP "silero_check_$PID.py"
-@'
-import sys
-sys.path.insert(0, r'__SCRIPT_DIR__')
-from speech_vad import create_silero_vad
-s = create_silero_vad(0.5)
-assert s is not None, "create_silero_vad returned None"
-print("silero ok")
-'@.Replace('__SCRIPT_DIR__', ($ScriptDir -replace '\\', '/')) |
-    Set-Content $svCheck -Encoding ASCII
-& $PyExe $svCheck
-if ($LASTEXITCODE -ne 0) {
-    Remove-Item $svCheck -Force -ErrorAction SilentlyContinue
-    Write-Fail "Silero VAD 校验失败，请确认 silero-vad 与 onnxruntime 已安装。"
+# CPU torch first so funasr does not pull a CUDA wheel
+Write-Info "  pip install torch+cpu / torchaudio+cpu"
+$rc = Invoke-EmbeddedPip @(
+    'install', 'torch', 'torchaudio', '--prefer-binary',
+    '--index-url', 'https://download.pytorch.org/whl/cpu'
+)
+if ($rc -ne 0) {
+    Write-Warn "PyTorch CPU 官方源失败，改走清华镜像"
+    $rc = Invoke-EmbeddedPip @('install', 'torch', 'torchaudio', '--prefer-binary')
+    if ($rc -ne 0) { Write-Fail "torch / torchaudio 安装失败" }
 }
-Remove-Item $svCheck -Force -ErrorAction SilentlyContinue
-Write-Ok "Silero VAD 已校验"
+Write-Ok "torch / torchaudio 已安装"
+
+if (-not (Install-FunasrStack)) {
+    Write-Fail "funasr 安装失败（镜像下载中断时可再跑一次 build_offline.ps1 -Force）"
+}
+
+Write-Info "  verify funasr + torch"
+$faCheck = Join-Path $env:TEMP "funasr_check_$PID.py"
+@'
+import funasr, torch
+print("funasr", getattr(funasr, "__version__", "?"))
+print("torch", torch.__version__, "cuda", torch.cuda.is_available())
+'@ | Set-Content $faCheck -Encoding ASCII
+& $PyExe $faCheck
+if ($LASTEXITCODE -ne 0) {
+    Remove-Item $faCheck -Force -ErrorAction SilentlyContinue
+    Write-Fail "funasr/torch 校验失败"
+}
+Remove-Item $faCheck -Force -ErrorAction SilentlyContinue
+Write-Ok "funasr / torch 已校验"
 
 # sherpa-onnx: KeywordSpotter 唤醒
 if ($IncludeKWS) {
@@ -463,7 +528,7 @@ switch ($GPU) {
         }
     }
     "dml" {
-        Write-Info "  dml 模式：Whisper 推理仍走 ctranslate2；未安装 onnxruntime-directml（本项目不需要）"
+        Write-Info "  dml 模式：客户端 VAD 走 FunASR/torch CPU，无需 DirectML"
     }
 }
 Write-Ok "Python 依赖包安装完成"
@@ -490,7 +555,7 @@ Write-Info "  已删除 $($testDirs.Count) 个测试目录"
 
 # 卸载 speech-rego 运行时不需要的第三方包（须在删除 pip 之前；最终以删目录为准）
 if ($PruneUnusedDeps) {
-    Write-Info "  裁剪冗余依赖（HF 下载加速 / CLI 等；保留 onnxruntime 供 Silero VAD）..."
+    Write-Info "  裁剪冗余依赖（HF CLI 等；保留 funasr / torch / modelscope）..."
     $pipMod = Join-Path $siteDir "pip"
     if (Test-Path $pipMod) {
         $prevEap = $ErrorActionPreference
@@ -508,8 +573,7 @@ if ($PruneUnusedDeps) {
     }
     $pruneDirs = @(
         'hf_xet', 'typer', 'rich', 'pygments', 'shellingham',
-        'annotated_doc', 'markdown_it', 'mdurl', 'colorama', 'flatbuffers',
-        'google', 'onnx'
+        'annotated_doc', 'markdown_it', 'mdurl'
     )
     foreach ($dirName in $pruneDirs) {
         $dirPath = Join-Path $siteDir $dirName
@@ -524,19 +588,13 @@ if ($PruneUnusedDeps) {
     $verifyPy = Join-Path $env:TEMP "speech_reco_verify_$PID.py"
     @'
 import sys
-mods = ("websockets", "sounddevice", "numpy", "faster_whisper", "ctranslate2", "zhconv", "pypinyin")
+mods = ("websockets", "sounddevice", "numpy", "funasr", "torch", "torchaudio", "zhconv", "pypinyin")
 failed = []
 for m in mods:
     try:
         __import__(m)
     except Exception as e:
         failed.append("%s: %s" % (m, e))
-try:
-    from speech_vad import create_silero_vad
-    if create_silero_vad(0.5) is None:
-        failed.append("silero: create_silero_vad returned None")
-except Exception as e:
-    failed.append("speech_vad: %s" % e)
 if failed:
     print("IMPORT_FAIL")
     for x in failed:
@@ -571,139 +629,20 @@ $afterMB = [int]((Get-ChildItem $PythonDir -Recurse -File -ErrorAction SilentlyC
                   Measure-Object -Property Length -Sum).Sum / 1MB)
 Write-Ok "清理完成，Python 目录当前大小：${afterMB} MB"
 
-# ── STEP 5: Whisper model ──────────────────────────────────────────────────────
-Write-Step 5 "下载 Whisper 模型（$WhisperModel）"
-Write-Info "持久缓存目录: $WModelCacheHF"
-
-# Complete cache = snapshot contains model.bin (refs-only / blobs-only is incomplete)
-$modelKey   = "models--Systran--faster-whisper-$WhisperModel"
-$modelHub   = Join-Path $WModelCacheHF "hub\$modelKey"
-$modelSnap  = Join-Path $modelHub "snapshots"
-
-function Test-WhisperSnapshotComplete {
-    param([string]$SnapshotsDir)
-    if (-not (Test-Path $SnapshotsDir)) { return $false }
-    foreach ($snap in Get-ChildItem $SnapshotsDir -Directory -ErrorAction SilentlyContinue) {
-        foreach ($w in @("model.bin", "model.safetensors")) {
-            $p = Join-Path $snap.FullName $w
-            if ((Test-Path $p) -and ((Get-Item $p).Length -gt 1MB)) { return $true }
-        }
-    }
-    return $false
-}
-
-if (Test-WhisperSnapshotComplete $modelSnap) {
-    Write-Ok "Whisper 模型已在缓存中（含权重文件），跳过下载：$modelKey"
+# ── STEP 5: FunASR fsmn-vad (client VAD only; no Fun-ASR-Nano) ──────────────
+Write-Step 5 "打包 fsmn-vad 模型"
+$vadRel = "models\funasr\models\iic--speech_fsmn_vad_zh-cn-16k-common-pytorch"
+$vadSrc = Join-Path $ScriptDir $vadRel
+$vadDst = Join-Path $OutputDir $vadRel
+if (Test-Path (Join-Path $vadSrc "model.pt")) {
+    New-Item -ItemType Directory -Force -Path $vadDst | Out-Null
+    robocopy $vadSrc $vadDst /E /NFL /NDL /NJH /NJS /NC /NS /NP | Out-Null
+    if ($LASTEXITCODE -ge 8) { Write-Fail "复制 fsmn-vad 失败，robocopy 退出码: $LASTEXITCODE" }
+    $vadMB = [int]((Get-ChildItem $vadDst -Recurse -File | Measure-Object -Property Length -Sum).Sum / 1MB)
+    Write-Ok "fsmn-vad 已打包（${vadMB} MB）"
 } else {
-    if (Test-Path $modelHub) {
-        Write-Warn "发现不完整的模型缓存（无 model.bin），正在删除后重新下载..."
-        Remove-Item $modelHub -Recurse -Force -ErrorAction SilentlyContinue
-    }
-    if ($WhisperModel -eq "large-v3") {
-        Write-Info "large-v3 约 3GB，下载可能需要 20-60 分钟，请保持网络畅通..."
-    } else {
-        Write-Info "缓存未命中，开始下载（首次约需数分钟）..."
-    }
-
-    $env:HF_HOME                  = $WModelCacheHF
-    $env:HF_ENDPOINT              = $HF_MIRROR
-    $env:HUGGINGFACE_HUB_ENDPOINT = $HF_MIRROR
-    $env:HF_HUB_OFFLINE           = "0"
-
-    $dlPy = Join-Path $env:TEMP "wh_dl_$PID.py"
-    @'
-import os, sys, glob
-os.environ["HF_HOME"] = "__HFDIR__"
-os.environ["HF_ENDPOINT"] = "__HFEP__"
-os.environ["HUGGINGFACE_HUB_ENDPOINT"] = "__HFEP__"
-os.environ.pop("HF_HUB_OFFLINE", None)
-try:
-    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-except Exception:
-    pass
-model = "__MODEL__"
-repo = f"Systran/faster-whisper-{model}"
-try:
-    from faster_whisper import WhisperModel
-    print(f"  Downloading {model} via faster-whisper ...", flush=True)
-    WhisperModel(model, device="cpu", compute_type="int8")
-except Exception as e:
-    print(f"  faster-whisper load failed: {e}", file=sys.stderr)
-    try:
-        from huggingface_hub import snapshot_download
-        print(f"  Retrying snapshot_download({repo}) ...", flush=True)
-        snapshot_download(repo_id=repo)
-    except Exception as e2:
-        print(f"  snapshot_download failed: {e2}", file=sys.stderr)
-        sys.exit(1)
-hub = os.path.join("__HFDIR__", "hub", f"models--Systran--faster-whisper-{model}", "snapshots", "*")
-for p in glob.glob(os.path.join(hub, "model.bin")) + glob.glob(os.path.join(hub, "model.safetensors")):
-    if os.path.getsize(p) > 1_000_000:
-        print(f"  OK: {p} ({os.path.getsize(p) // (1024*1024)} MB)", flush=True)
-        sys.exit(0)
-print("  ERROR: model.bin not found after download", file=sys.stderr)
-sys.exit(1)
-'@ | Set-Content $dlPy -Encoding UTF8
-
-    $hfEscaped = $WModelCacheHF -replace '\\', '\\\\'
-    (Get-Content $dlPy -Raw -Encoding UTF8) `
-        -replace '__HFDIR__', $hfEscaped `
-        -replace '__HFEP__',  $HF_MIRROR `
-        -replace '__MODEL__', $WhisperModel |
-        Set-Content $dlPy -Encoding UTF8
-
-    & $PyExe $dlPy
-    if ($LASTEXITCODE -ne 0) {
-        Write-Fail "Whisper 模型 '$WhisperModel' 下载失败。请检查网络、代理或 HF 镜像 ($HF_MIRROR)。"
-    }
-    Remove-Item $dlPy -Force -ErrorAction SilentlyContinue
-    if (-not (Test-WhisperSnapshotComplete $modelSnap)) {
-        Write-Fail "下载结束但 snapshot 仍无 model.bin，请重试 build_offline.bat $WhisperModel"
-    }
-    Write-Ok "Whisper 模型下载完成：$WhisperModel"
-}
-
-# ── 将 Whisper 模型以 HF hub 缓存结构打包进 models\hf\
-# 方案：只复制 snapshot 文件（不含 blobs 重复副本），同时生成最小化的
-# HF hub 目录结构（refs/main + snapshots/<hash>/），让 faster-whisper
-# 通过 HF_HOME 直接定位模型，无需任何路径魔法。
-$hfPackDir    = Join-Path $ModelsDir "hf"
-$snapshotBase = Join-Path $WModelCacheHF "hub\$modelKey\snapshots"
-
-if (Test-Path $snapshotBase) {
-    $latestSnap = Get-ChildItem $snapshotBase -Directory |
-                  Sort-Object LastWriteTime -Descending | Select-Object -First 1
-    if ($latestSnap) {
-        $weightFile = @("model.bin", "model.safetensors") | ForEach-Object {
-            Join-Path $latestSnap.FullName $_
-        } | Where-Object { Test-Path $_ } | Select-Object -First 1
-        if (-not $weightFile) {
-            Write-Fail @"
-Whisper 模型 '$WhisperModel' 下载不完整（snapshot 中无 model.bin）。
-请删除缓存后重试:
-  Remove-Item -Recurse -Force '$modelKey' -ErrorAction SilentlyContinue
-  (位于 $WModelCacheHF\hub\)
-然后重新运行 build_offline.bat $WhisperModel cuda
-"@
-        }
-        $snapHash   = $latestSnap.Name
-        $destSnap   = Join-Path $hfPackDir "hub\$modelKey\snapshots\$snapHash"
-        $destRefs   = Join-Path $hfPackDir "hub\$modelKey\refs"
-        New-Item -ItemType Directory -Force -Path $destSnap | Out-Null
-        New-Item -ItemType Directory -Force -Path $destRefs | Out-Null
-        Write-Info "打包 Whisper 模型到 models\hf\ (snapshot 含 model.bin)..."
-        # Copy-Item 会复制实体文件；robocopy 默认可能只复制符号链接导致缺 model.bin
-        Copy-Item -Path (Join-Path $latestSnap.FullName '*') -Destination $destSnap -Recurse -Force
-        Set-Content (Join-Path $destRefs "main") $snapHash -Encoding ASCII -NoNewline
-        Set-Content (Join-Path $ModelsDir "bundled_whisper_model.txt") $WhisperModel -Encoding ASCII -NoNewline
-        $modelFiles = @(Get-ChildItem $destSnap -Recurse -File -ErrorAction SilentlyContinue)
-        $modelSizeMB = [int](($modelFiles | Measure-Object -Property Length -Sum).Sum / 1MB)
-        Write-Ok "Whisper 模型已打包（$($modelFiles.Count) 个文件，${modelSizeMB} MB）"
-    } else {
-        Write-Fail "找不到 Whisper snapshot 目录: $snapshotBase`n请检查 STEP 5 下载是否成功。"
-    }
-} else {
-    Write-Fail "缓存中未找到模型: $modelKey`n请检查网络/HF 镜像后重新构建。"
+    Write-Warn "源目录没有 fsmn-vad 权重: $vadSrc"
+    Write-Warn "安装后首次启动会从 ModelScope 下载 fsmn-vad"
 }
 
 # ── STEP 6: Sherpa KWS model ───────────────────────────────────────────────────
@@ -712,6 +651,12 @@ if ($IncludeKWS) {
     $sherpaOutDir = Join-Path $ModelsDir "sherpa-kws\$SHERPA_KWS_NAME"
     $sherpaCached = Join-Path $SherpaKwsCacheDir $SHERPA_KWS_NAME
     $tokensCached = Join-Path $sherpaCached "tokens.txt"
+    $localSherpa = Join-Path $ScriptDir "models\sherpa-kws\$SHERPA_KWS_NAME"
+    if ((-not (Test-Path $tokensCached)) -and (Test-Path (Join-Path $localSherpa "tokens.txt"))) {
+        Write-Info "使用仓库内已有 Sherpa KWS 模型"
+        New-Item -ItemType Directory -Force -Path $sherpaCached | Out-Null
+        robocopy $localSherpa $sherpaCached /E /NFL /NDL /NJH /NJS /NC /NS /NP | Out-Null
+    }
 
     if (-not (Test-Path $tokensCached)) {
         $tarName = "$SHERPA_KWS_NAME.tar.bz2"
@@ -787,7 +732,7 @@ print("extract ok:", tokens)
     robocopy $sherpaCached $sherpaOutDir /E /NFL /NDL /NJH /NJS /NC /NS /NP | Out-Null
     Write-Ok "Sherpa KWS 模型已打包到 models\sherpa-kws\$SHERPA_KWS_NAME"
 
-    # 预生成默认唤醒词 keywords.txt（小智）
+    # 预生成默认唤醒词 keywords.txt（智安）
     $kwCache = Join-Path $sherpaOutDir ".keywords-cache"
     New-Item -ItemType Directory -Force -Path $kwCache | Out-Null
     $kwGenPy = Join-Path $env:TEMP "sherpa_kwgen_$PID.py"
@@ -806,7 +751,7 @@ cfg = {
     "lexicon": "",
 }
 paths = resolve_sherpa_model_paths(cfg, base.parent.parent)
-out = build_sherpa_keywords_file(["小智"], cfg, paths, cache_dir=Path(r"__KW_CACHE__"))
+out = build_sherpa_keywords_file(["智安"], cfg, paths, cache_dir=Path(r"__KW_CACHE__"))
 print("keywords:", out)
 '@.Replace('__SCRIPT_DIR__', ($ScriptDir -replace '\\', '/')).
         Replace('__OUT__', ($sherpaOutDir -replace '\\', '/')).
@@ -827,7 +772,7 @@ print("keywords:", out)
 Write-Step 7 "复制应用程序源文件"
 
 $appFiles = @(
-    "server.py", "engine.py", "whisper_local.py", "speech_vad.py",
+    "server.py", "engine.py", "funasr_asr.py", "remote_asr.py", "speech_vad.py",
     "text_postprocess.py", "wake_config.py", "wake_detectors.py", "wake_gating.py",
     "index.html", "config.json",
     "list_devices.py", "check_env.py",
@@ -847,18 +792,23 @@ foreach ($f in $appFiles) {
 $cfgOut = Join-Path $OutputDir "config.json"
 try {
     $cfg = Get-Content $cfgOut -Raw -Encoding UTF8 | ConvertFrom-Json
-    $cfg.whisper.model = [string]$WhisperModel
+    $cfg.host = "127.0.0.1"
+    $cfg.port = 8766
+    $cfg.http_port = 9400
+    if ($cfg.funasr) {
+        $cfg.funasr.device = "cpu"
+        $cfg.funasr.cache_dir = "models/funasr"
+    }
     if ($cfg.PSObject.Properties.Name -contains 'asr') {
         $cfg.PSObject.Properties.Remove('asr')
     }
     if ($cfg.wake_word.PSObject.Properties.Name -contains 'mode') {
         $cfg.wake_word.PSObject.Properties.Remove('mode')
     }
-    $cfg.port = 8765
     $json = $cfg | ConvertTo-Json -Depth 12
     $utf8 = New-Object System.Text.UTF8Encoding $true
     [System.IO.File]::WriteAllText($cfgOut, $json, $utf8)
-    Write-Ok "config.json 已写入 whisper.model=$WhisperModel"
+    Write-Ok "config.json 已写入 port=8766 http_port=9400 funasr.device=cpu"
 } catch {
     Write-Warn "config.json 自动更新失败：$_"
 }
@@ -873,20 +823,15 @@ chcp 65001 >nul
 setlocal enabledelayedexpansion
 set PYTHONIOENCODING=utf-8
 set PYTHONUTF8=1
-:: HF_HOME must be quoted (paths with spaces)
-set "HF_HOME=%~dp0models\hf"
-set HF_HUB_OFFLINE=1
-set HF_DATASETS_OFFLINE=1
-cd /d "%~dp0"
-:: Add nvidia pip DLL dirs to PATH for ctranslate2 CUDA
-for /d %%P in ("%~dp0python\Lib\site-packages\nvidia\*") do (
-    if exist "%%P\bin\" set "PATH=%%P\bin;!PATH!"
-)
-title Speech Reco ws://127.0.0.1:8765
+set "MODELSCOPE_CACHE=%~dp0models\funasr"
+set "MODELSCOPE_MODULES_CACHE=%~dp0models\funasr"
+cd /d "%~dp0."
+title Speech Client  ws://127.0.0.1:8766  http://127.0.0.1:9400
 echo.
 echo  ================================================
-echo    Speech Recognition  port 8765
-echo    Model: $WhisperModel
+echo    Speech client  (wake + remote FunASR)
+echo    WebSocket : ws://127.0.0.1:8766
+echo    Web UI    : http://127.0.0.1:9400/index.html
 echo    Press Ctrl+C to stop
 echo  ================================================
 echo.
@@ -902,9 +847,8 @@ chcp 65001 >nul
 setlocal
 set PYTHONIOENCODING=utf-8
 set PYTHONUTF8=1
-set "HF_HOME=%~dp0models\hf"
-set HF_HUB_OFFLINE=1
-cd /d "%~dp0"
+set "MODELSCOPE_CACHE=%~dp0models\funasr"
+cd /d "%~dp0."
 title Environment check
 "%~dp0python\python.exe" "%~dp0check_env.py"
 pause
@@ -919,7 +863,7 @@ $readmeTpl    = Join-Path $ScriptDir "installer_assets\offline_package_README.tx
 $utf8NoBom    = New-Object System.Text.UTF8Encoding $false
 if (Test-Path -LiteralPath $readmeTpl) {
     $readmeText = [System.IO.File]::ReadAllText($readmeTpl, $utf8NoBom)
-    $readmeText = $readmeText.Replace("{WhisperModel}", $WhisperModel).
+    $readmeText = $readmeText.Replace("{WhisperModel}", "remote-funasr").
         Replace("{GPU}", $GPU).Replace("{PY_VER}", $PY_VER).
         Replace("{BuildTime}", $buildTime)
     [System.IO.File]::WriteAllText($readmeOut, $readmeText, $utf8NoBom)
@@ -946,7 +890,9 @@ Write-Host "  输出目录 : $OutputDir"
 Write-Host "  总大小   : ${totalMB} MB"
 Write-Host ""
 Write-Host "  部署步骤:"
-Write-Host "    1. 将 '$OutputDir' 整个文件夹复制到目标机器"
+Write-Host "    1. 将 '$OutputDir' 整个文件夹复制到目标机器，或继续运行 build_client_installer.bat"
 Write-Host "    2. 运行 check_env.bat 验证环境"
-Write-Host "    3. 运行 start.bat 启动服务"
+Write-Host "    3. 运行 start.bat 启动（控制台），或安装为 Windows 服务"
+Write-Host "    Web UI     http://127.0.0.1:9400/index.html"
+Write-Host "    WebSocket  ws://127.0.0.1:8766"
 Write-Host ""

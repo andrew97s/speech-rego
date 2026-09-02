@@ -1,0 +1,6 @@
+# 使用说明（SpeechRecoWebSetup.exe）
+# 1. 将本文件复制为 PackageUrl.txt（与 SpeechRecoWebSetup.exe 放在同一目录）
+# 2. 删除下面示例中的 #，只保留一行以 https:// 或 http:// 开头的直链（不要加引号）
+# 3. 该链接应指向你上传到公网的「服务安装包」ZIP（与本仓库 build_service_installer 生成的 ZIP 相同布局）
+
+# https://你的域名或对象存储/路径/SpeechReco-Offline-WindowsService.zip

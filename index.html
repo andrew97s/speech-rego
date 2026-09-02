@@ -373,7 +373,7 @@
   <!-- Connection bar -->
   <div class="card conn-bar">
     <div class="dot" id="dot"></div>
-    <input id="wsUrl" type="text" value="ws://127.0.0.1:8765" spellcheck="false">
+    <input id="wsUrl" type="text" value="ws://127.0.0.1:8766" spellcheck="false">
     <button type="button" class="btn btn-primary btn-connect" id="btnConnect" onclick="toggleConnect()">连接</button>
   </div>
 
@@ -1114,6 +1114,12 @@
   }
 
   // ── Init ─────────────────────────────────────────────────────────────────────
+  (function initWsUrl() {
+    const el = document.getElementById('wsUrl');
+    if (el && location.hostname) {
+      el.value = 'ws://' + location.hostname + ':8766';
+    }
+  })();
   logEvent('system', '就绪，点击「连接」开始。');
 </script>
 </body>

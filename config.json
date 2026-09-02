@@ -121,6 +121,6 @@
         "stereo_mode": "mix"
     },
     "log_level": "INFO",
-    "http_port": 8080,
+    "http_port": 9400,
     "auto_stop_without_clients_ms": 60000
 }
